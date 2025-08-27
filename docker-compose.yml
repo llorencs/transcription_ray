@@ -1,0 +1,124 @@
+services:
+  # MongoDB for storing metadata and task information
+  mongodb:
+    image: mongo:8.0
+    container_name: transcription_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: transcription_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - transcription_network
+
+  # Redis for Ray and caching
+  redis:
+    image: redis:7.4-alpine
+    container_name: transcription_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - transcription_network
+
+  # Ray Head Node
+  ray-head:
+    build:
+      context: .
+      dockerfile: Dockerfile.ray
+    container_name: transcription_ray_head
+    restart: unless-stopped
+    command: >
+      bash -c "
+      ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --ray-client-server-port=10001 &&
+      sleep 10 &&
+      serve deploy /app/config/serve_config.yaml &&
+      tail -f /dev/null
+      "
+    ports:
+      - "8265:8265"  # Ray Dashboard
+      - "10001:10001"  # Ray Client
+      - "8000:8000"   # Ray Serve
+    volumes:
+      - ./models_cache:/app/models
+      - ./temp:/app/temp
+      - ./config:/app/config
+    environment:
+      - RAY_DISABLE_IMPORT_WARNING=1
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+      - mongodb
+    networks:
+      - transcription_network
+
+  # FastAPI Main Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: transcription_api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./temp:/app/temp
+      - ./models_cache:/app/models
+    environment:
+      - MONGODB_URL=mongodb://admin:password123@mongodb:27017/transcription_db?authSource=admin
+      - RAY_ADDRESS=ray://ray-head:10001
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongodb
+      - ray-head
+      - redis
+    networks:
+      - transcription_network
+
+  # Preprocessing Service
+  preprocessor:
+    build:
+      context: .
+      dockerfile: Dockerfile.preprocessor
+    container_name: transcription_preprocessor
+    restart: unless-stopped
+    volumes:
+      - ./temp:/app/temp
+      - ./models_cache:/app/models
+    environment:
+      - MONGODB_URL=mongodb://admin:password123@mongodb:27017/transcription_db?authSource=admin
+      - RAY_ADDRESS=ray://ray-head:10001
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - mongodb
+      - ray-head
+    networks:
+      - transcription_network
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  transcription_network:
+    driver: bridge

@@ -1,0 +1,62 @@
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+USER root
+
+WORKDIR /app
+
+# Install Python 3.12 and system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    build-essential \
+    pkg-config \
+    git \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.12 as default and create virtual environment
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python && \
+    python3 -m venv /opt/venv
+
+# Activate virtual environment and upgrade pip
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Copy requirements and install Python packages
+COPY requirements.ray.txt .
+RUN pip install --no-cache-dir -r requirements.ray.txt
+
+# Copy application code
+COPY ./src /app/src
+COPY ./config /app/config
+
+# Create directories for ML models and temporary files
+RUN mkdir -p /app/temp /app/models
+
+# Create ray user and set ownership (use automatic UID if 1001 conflicts)
+RUN if id -u ray >/dev/null 2>&1; then \
+        echo "User ray already exists"; \
+    else \
+        useradd -m ray; \
+    fi && \
+    chown -R ray:ray /app /opt/venv
+
+# Set environment variables
+ENV PYTHONPATH=/app:/app/src
+ENV PYTHONUNBUFFERED=1
+ENV RAY_DISABLE_IMPORT_WARNING=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="/opt/venv/bin:/usr/local/cuda/bin:$PATH"
+
+USER ray
+
+# Expose ports
+EXPOSE 6379 8265 10001 8000
+
+CMD ["bash"]
