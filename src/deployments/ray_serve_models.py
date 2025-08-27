@@ -34,7 +34,7 @@ class LanguageDetectionRequest(BaseModel):
 
 
 # Create FastAPI app
-app = FastAPI(title="Transcription Service", version="1.0.0")
+fastapi_app = FastAPI(title="Transcription Service", version="1.0.0")
 
 
 @serve.deployment(
@@ -275,21 +275,21 @@ class LanguageDetectionService:
 
 
 # FastAPI routes
-@app.post("/transcribe")
+@fastapi_app.post("/transcribe")
 async def transcribe_endpoint(request: TranscriptionRequest):
     """HTTP endpoint for transcription."""
     transcription_service = serve.get_deployment("TranscriptionService").get_handle()
     return await transcription_service.transcribe_audio.remote(request)
 
 
-@app.post("/detect-language")
+@fastapi_app.post("/detect-language")
 async def detect_language_endpoint(request: LanguageDetectionRequest):
     """HTTP endpoint for language detection."""
     language_service = serve.get_deployment("LanguageDetectionService").get_handle()
     return await language_service.detect_language.remote(request)
 
 
-@app.get("/health")
+@fastapi_app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "transcription-ray-serve"}
