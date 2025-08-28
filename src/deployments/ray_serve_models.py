@@ -33,20 +33,29 @@ class LanguageDetectionRequest(BaseModel):
     detect_only: bool = True
 
 
-# Create FastAPI app
-fastapi_app = FastAPI(title="Transcription Service", version="1.0.0")
-
-
 @serve.deployment(
     num_replicas=1,
     ray_actor_options={"num_gpus": 1, "num_cpus": 2, "memory": 8_000_000_000},
 )
 class TranscriptionService:
-    def __init__(self, config: Dict[str, Any] = None):
-        self.config = config or {}
-        self.model_cache_path = self.config.get("model_cache_path", "/app/models")
-        self.default_model = self.config.get("default_whisper_model", "base")
-        self.enable_diarization = self.config.get("enable_diarization", True)
+    def __init__(self):
+        # Try to get config from user_config (both YAML and programmatic)
+        try:
+            user_config = (
+                serve.get_replica_context().deployment_config.user_config or {}
+            )
+        except:
+            # Fallback if replica context is not available
+            user_config = {}
+
+        self.model_cache_path = user_config.get("model_cache_path", "/app/models")
+        self.default_model = user_config.get("default_whisper_model", "base")
+        self.enable_diarization = user_config.get("enable_diarization", True)
+
+        print(
+            f"TranscriptionService initializing with: cache={self.model_cache_path}, "
+            f"model={self.default_model}, diarization={self.enable_diarization}"
+        )
 
         self.whisper_models = {}
         self.diarization_pipeline = None
@@ -223,10 +232,23 @@ class TranscriptionService:
     ray_actor_options={"num_gpus": 0.5, "num_cpus": 1, "memory": 4_000_000_000},
 )
 class LanguageDetectionService:
-    def __init__(self, config: Dict[str, Any] = None):
-        self.config = config or {}
-        self.model_cache_path = self.config.get("model_cache_path", "/app/models")
-        self.whisper_model_size = self.config.get("whisper_model", "base")
+    def __init__(self):
+        # Try to get config from user_config (both YAML and programmatic)
+        try:
+            user_config = (
+                serve.get_replica_context().deployment_config.user_config or {}
+            )
+        except:
+            # Fallback if replica context is not available
+            user_config = {}
+
+        self.model_cache_path = user_config.get("model_cache_path", "/app/models")
+        self.whisper_model_size = user_config.get("whisper_model", "base")
+
+        print(
+            f"LanguageDetectionService initializing with: cache={self.model_cache_path}, "
+            f"model={self.whisper_model_size}"
+        )
 
         self.whisper_model = None
         self._load_model()
@@ -274,19 +296,47 @@ class LanguageDetectionService:
             )
 
 
-# FastAPI routes
+# Create FastAPI app first (before the deployment class)
+fastapi_app = FastAPI(title="Transcription Service", version="1.0.0")
+
+
+# Alternative: FastAPI ingress that combines both services
+@serve.deployment(
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1, "memory": 1_000_000_000},
+)
+@serve.ingress(fastapi_app)
+class FastAPITranscriptionApp:
+    def __init__(self, transcription_service, language_detection_service):
+        self.transcription_service = transcription_service
+        self.language_detection_service = language_detection_service
+        print("FastAPITranscriptionApp initialized with both services")
+
+
 @fastapi_app.post("/transcribe")
 async def transcribe_endpoint(request: TranscriptionRequest):
     """HTTP endpoint for transcription."""
-    transcription_service = serve.get_deployment("TranscriptionService").get_handle()
-    return await transcription_service.transcribe_audio.remote(request)
+    try:
+        # Get the current deployment instance
+        app = serve.get_replica_context().deployment
+        result = await app.transcription_service.transcribe_audio.remote(request)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
 @fastapi_app.post("/detect-language")
 async def detect_language_endpoint(request: LanguageDetectionRequest):
     """HTTP endpoint for language detection."""
-    language_service = serve.get_deployment("LanguageDetectionService").get_handle()
-    return await language_service.detect_language.remote(request)
+    try:
+        # Get the current deployment instance
+        app = serve.get_replica_context().deployment
+        result = await app.language_detection_service.detect_language.remote(request)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Language detection failed: {str(e)}"
+        )
 
 
 @fastapi_app.get("/health")
@@ -295,5 +345,51 @@ async def health_check():
     return {"status": "healthy", "service": "transcription-ray-serve"}
 
 
-# For programmatic deployment (if needed) - REMOVED because we use YAML config
-# The deployments are handled by serve deploy /app/config/serve_config.yaml
+# Main build_app function using FastAPI
+def build_app_with_fastapi(args: dict):
+    """
+    Build app using FastAPI ingress.
+
+    This creates both backend services and returns a FastAPI ingress that routes to them.
+    """
+
+    # Extract configuration from args
+    model_cache_path = args.get("model_cache_path", "/app/models")
+    default_whisper_model = args.get("default_whisper_model", "base")
+    enable_diarization = args.get("enable_diarization", True)
+    whisper_model = args.get("whisper_model", "base")
+
+    print(f"Building FastAPI app with config:")
+    print(f"  model_cache_path: {model_cache_path}")
+    print(f"  default_whisper_model: {default_whisper_model}")
+    print(f"  enable_diarization: {enable_diarization}")
+    print(f"  whisper_model: {whisper_model}")
+
+    # Create both service deployments with unique names
+    transcription_service = TranscriptionService.options(
+        name="TranscriptionServiceBackend",  # Unique name
+        user_config={
+            "model_cache_path": model_cache_path,
+            "default_whisper_model": default_whisper_model,
+            "enable_diarization": enable_diarization,
+        },
+    ).bind()
+
+    language_detection_service = LanguageDetectionService.options(
+        name="LanguageDetectionServiceBackend",  # Unique name
+        user_config={
+            "model_cache_path": model_cache_path,
+            "whisper_model": whisper_model,
+        },
+    ).bind()
+
+    # Return FastAPI ingress that can access both services
+    return FastAPITranscriptionApp.options(name="TranscriptionAPIGateway").bind(
+        transcription_service, language_detection_service
+    )
+
+
+# Keep the simple build_app as an alias for backward compatibility
+def build_app(args: dict):
+    """Simple alias to the FastAPI version."""
+    return build_app_with_fastapi(args)

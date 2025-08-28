@@ -1,29 +1,13 @@
 applications:
   - name: transcription-service
     route_prefix: "/"
-    import_path: src.deployments.ray_serve_models:app
+    import_path: src.deployments.ray_serve_models:build_app
     runtime_env: {}
-    deployments:
-      - name: TranscriptionService
-        num_replicas: 1
-        user_config:
-          model_cache_path: "/app/models"
-          default_whisper_model: "base"
-          enable_diarization: true
-        ray_actor_options:
-          num_gpus: 1
-          num_cpus: 2
-          memory: 8000000000  # 8GB
-        
-      - name: LanguageDetectionService  
-        num_replicas: 1
-        user_config:
-          model_cache_path: "/app/models"
-          whisper_model: "base"
-        ray_actor_options:
-          num_gpus: 0.5
-          num_cpus: 1
-          memory: 4000000000  # 4GB
+    args:
+      model_cache_path: "/app/models"
+      default_whisper_model: "base"
+      enable_diarization: true
+      whisper_model: "base"
 
 http_options:
   host: "0.0.0.0"
