@@ -37,9 +37,18 @@ services:
     restart: unless-stopped
     command: >
       bash -c "
+      echo '🚀 Starting Ray Head Node...' &&
       ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --ray-client-server-port=10001 &&
-      sleep 10 &&
-      serve deploy /app/config/serve_config.yaml &&
+      echo '✅ Ray Head Node started' &&
+      echo '📋 Ray cluster info:' &&
+      ray status &&
+      echo '⏳ Waiting for services to be ready...' &&
+      sleep 15 &&
+      echo '🚀 Submitting transcription service job...' &&
+      chmod +x /app/scripts/job_management.sh &&
+      /app/scripts/job_management.sh submit &&
+      echo '📊 Job submitted. Monitor with: /app/scripts/job_management.sh logs' &&
+      echo '🔄 Ray head node running. Access dashboard at http://localhost:8265' &&
       tail -f /dev/null
       "
     ports:
@@ -50,6 +59,7 @@ services:
       - ./models_cache:/app/models
       - ./temp:/app/temp
       - ./config:/app/config
+      - ./scripts:/app/scripts
     environment:
       - RAY_DISABLE_IMPORT_WARNING=1
       - CUDA_VISIBLE_DEVICES=0
