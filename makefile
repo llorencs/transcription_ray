@@ -139,6 +139,14 @@ ray-stop-serve:
 	@echo "🛑 Stopping Ray Serve..."
 	@docker compose exec ray-head python -c "from ray import serve; serve.shutdown()"
 
+ray-monitor:
+	@echo "📊 Monitoring Ray Serve (continuous)..."
+	@docker compose exec ray-head python /app/scripts/monitor_service.py
+
+ray-check:
+	@echo "📊 Quick Ray Serve status check..."
+	@docker compose exec ray-head python /app/scripts/monitor_service.py --quick
+
 # Example usage
 example:
 	@echo "📝 Example API usage:"

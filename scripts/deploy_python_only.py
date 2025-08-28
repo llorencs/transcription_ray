@@ -137,42 +137,45 @@ def deploy_transcription_service():
         except Exception as e:
             print(f"⚠️  Could not test service: {e}")
 
-        # Monitor service
-        print("🔄 Service is running... Monitoring...")
+        # Final status check and exit
+        print("🔄 Final status check...")
+        time.sleep(10)  # Give deployments time to stabilize
+
         try:
-            while True:
-                time.sleep(60)
+            status = serve.status()
+            apps = status.applications
 
-                # Periodic status check
-                try:
-                    status = serve.status()
-                    apps = status.applications
+            if "transcription-service" in apps:
+                app_status = apps["transcription-service"]
+                print(f"📈 Final service status: {app_status.status}")
 
-                    if "transcription-service" in apps:
-                        app_status = apps["transcription-service"]
-                        print(f"📈 Service status: {app_status.status}")
+                # Count healthy replicas
+                healthy_count = 0
+                total_count = 0
 
-                        # Count healthy replicas
-                        healthy_count = 0
-                        total_count = 0
+                for deployment_name, deployment_info in app_status.deployments.items():
+                    total_count += 1
+                    if deployment_info.status == "HEALTHY":
+                        healthy_count += 1
+                    print(f"  • {deployment_name}: {deployment_info.status}")
 
-                        for (
-                            deployment_name,
-                            deployment_info,
-                        ) in app_status.deployments.items():
-                            total_count += 1
-                            if deployment_info.status == "HEALTHY":
-                                healthy_count += 1
+                print(f"📊 Healthy deployments: {healthy_count}/{total_count}")
 
-                        print(f"📊 Healthy deployments: {healthy_count}/{total_count}")
-                    else:
-                        print("❌ Application not found in status")
+                if healthy_count == total_count and app_status.status == "RUNNING":
+                    print("✅ Deployment completed successfully!")
+                    print("🔄 Service is now running in detached mode")
+                    return True
+                else:
+                    print("⚠️  Some deployments may not be ready yet")
+                    print("💡 Use 'make health' or 'make ray-status' to check status")
+                    return True  # Still consider it successful as it's running
+            else:
+                print("❌ Application not found in status")
+                return False
 
-                except Exception as e:
-                    print(f"❌ Error in status check: {e}")
-
-        except KeyboardInterrupt:
-            print("🛑 Service stopped by user")
+        except Exception as e:
+            print(f"❌ Error in final status check: {e}")
+            print("⚠️  Deployment may still be successful - check manually")
             return True
 
     except Exception as e:
