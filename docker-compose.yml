@@ -42,13 +42,9 @@ services:
       echo '✅ Ray Head Node started' &&
       echo '📋 Ray cluster info:' &&
       ray status &&
-      echo '⏳ Waiting for services to be ready...' &&
-      sleep 15 &&
-      echo '🚀 Submitting transcription service job...' &&
-      chmod +x /app/scripts/job_management.sh &&
-      /app/scripts/job_management.sh submit &&
-      echo '📊 Job submitted. Monitor with: /app/scripts/job_management.sh logs' &&
-      echo '🔄 Ray head node running. Access dashboard at http://localhost:8265' &&
+      echo '⏳ Ray cluster ready. Use: make deploy or make deploy-job' &&
+      echo '📊 Dashboard: http://localhost:8265' &&
+      echo '🔄 Ray head node running...' &&
       tail -f /dev/null
       "
     ports:

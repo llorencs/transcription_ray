@@ -394,3 +394,12 @@ def build_app_with_fastapi(args: dict):
 def build_app(args: dict):
     """Simple alias to the FastAPI version."""
     return build_app_with_fastapi(args)
+
+
+DEFAULT_CONFIG = {
+    "model_cache_path": "/app/models",
+    "default_whisper_model": "base",
+    "enable_diarization": True,
+    "whisper_model": "base",
+}
+app = build_app_with_fastapi(DEFAULT_CONFIG)

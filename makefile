@@ -13,7 +13,8 @@ help:
 	@echo "  test         - Run API tests (requires TEST_AUDIO_FILE)"
 	@echo "  clean        - Clean up containers and volumes"
 	@echo "  build        - Build Docker images"
-	@echo "  deploy       - Deploy Ray Serve models"
+	@echo "  deploy       - Deploy Ray Serve models (Python-only)"
+	@echo "  deploy-job   - Deploy using Ray Job submission"
 	@echo "  health       - Check service health"
 
 # Start services
@@ -60,15 +61,26 @@ build:
 	@echo "🏗️ Building Docker images..."
 	@docker compose build --parallel
 
-# Deploy models
+# Deploy models (Python-only approach)
 deploy:
-	@echo "🤖 Deploying Ray Serve models..."
-	@docker compose exec ray-head python src/deployments/ray_serve_models.py
+	@echo "🤖 Deploying Ray Serve models (Python-only)..."
+	@docker compose exec ray-head python /app/scripts/deploy_python_only.py
+
+# Deploy using Ray Job submission
+deploy-job:
+	@echo "🚀 Deploying using Ray Job submission..."
+	@docker compose exec ray-head /app/scripts/job_management.sh submit
+
+# Alternative: deploy from YAML (if needed)
+deploy-yaml:
+	@echo "🤖 Deploying Ray Serve models from YAML..."
+	@docker compose exec ray-head serve deploy /app/config/serve_config.yaml
 
 # Health check
 health:
 	@echo "🔍 Checking service health..."
 	@curl -s http://localhost:8080/health | jq '.' || echo "❌ API service not responding"
+	@curl -s http://localhost:8000/health | jq '.' || echo "❌ Ray Serve not responding"
 	@curl -s http://localhost:8265/api/cluster_status | jq '.cluster_status' || echo "❌ Ray cluster not responding"
 
 # Development targets
@@ -105,6 +117,7 @@ monitor:
 	@echo "📊 Opening monitoring dashboards..."
 	@echo "Ray Dashboard: http://localhost:8265"
 	@echo "API Documentation: http://localhost:8080/docs"
+	@echo "Ray Serve Health: http://localhost:8000/health"
 	@if command -v open >/dev/null 2>&1; then \
 		open http://localhost:8080/docs; \
 		open http://localhost:8265; \
@@ -112,6 +125,19 @@ monitor:
 		xdg-open http://localhost:8080/docs; \
 		xdg-open http://localhost:8265; \
 	fi
+
+# Ray-specific operations
+ray-status:
+	@echo "📊 Ray Cluster Status:"
+	@docker compose exec ray-head ray status
+
+ray-logs:
+	@echo "📝 Ray Job Logs:"
+	@docker compose exec ray-head /app/scripts/job_management.sh logs
+
+ray-stop-serve:
+	@echo "🛑 Stopping Ray Serve..."
+	@docker compose exec ray-head python -c "from ray import serve; serve.shutdown()"
 
 # Example usage
 example:
@@ -133,3 +159,7 @@ example:
 	@echo ""
 	@echo "4. Download results:"
 	@echo "   curl http://localhost:8080/results/your-task-id/srt"
+	@echo ""
+	@echo "5. Ray Serve endpoints:"
+	@echo "   curl http://localhost:8000/health"
+	@echo "   curl -X POST http://localhost:8000/transcribe -H 'Content-Type: application/json' -d '{\"audio_path\": \"/path/to/audio.wav\"}'"
