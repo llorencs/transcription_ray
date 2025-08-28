@@ -1,13 +1,14 @@
 """
+src/api/main.py
+
 Main FastAPI application for the transcription service.
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 import os
-import asyncio
 import io
 from pathlib import Path
 
@@ -23,94 +24,10 @@ from src.models.files import FileResponse, FilesResponse
 from src.models.pydantic_models import ASRModel, JSONModel
 from src.database.mongodb import MongoDB
 from src.services.file_service import FileService
+from src.services.transcription_service import HybridTranscriptionService
 from src.utils.ray_client import RayClient
 
-
-# Simple transcription service for initial testing
-class SimpleTranscriptionService:
-    def __init__(self, db: MongoDB, ray_client: RayClient):
-        self.db = db
-        self.ray_client = ray_client
-
-    async def start_transcription(self, request: TranscriptionReqModel) -> str:
-        task_id = str(uuid.uuid4())
-        task_data = {
-            "task_id": task_id,
-            "file_id": request.file_id,
-            "model": request.model,
-            "status": "pending",
-            "created_at": datetime.utcnow(),
-        }
-        await self.db.create_task(task_data)
-        return task_id
-
-    async def start_transcription_from_url(
-        self, request: TranscriptionURLReqModel
-    ) -> str:
-        task_id = str(uuid.uuid4())
-        task_data = {
-            "task_id": task_id,
-            "source_url": request.url,
-            "model": request.model,
-            "status": "pending",
-            "created_at": datetime.utcnow(),
-        }
-        await self.db.create_task(task_data)
-        return task_id
-
-    async def get_task(self, task_id: str) -> Optional[TaskRespModel]:
-        task = await self.db.get_task(task_id)
-        if not task:
-            return None
-        return TaskRespModel(
-            id=task["task_id"],
-            status=task["status"],
-            result=task.get("result_summary"),
-            error_message=task.get("error_message"),
-        )
-
-    async def list_tasks(self, skip: int = 0, limit: int = 100) -> List[TaskRespModel]:
-        tasks = await self.db.list_tasks(skip=skip, limit=limit)
-        return [
-            TaskRespModel(
-                id=task["task_id"],
-                status=task["status"],
-                result=task.get("result_summary"),
-                error_message=task.get("error_message"),
-            )
-            for task in tasks
-        ]
-
-    async def cancel_task(self, task_id: str) -> bool:
-        return await self.db.update_task(task_id, {"status": "cancelled"})
-
-    async def get_json_result(self, task_id: str) -> Optional[JSONModel]:
-        # Placeholder - return None for now
-        return None
-
-    async def get_asr_result(self, task_id: str) -> Optional[ASRModel]:
-        # Placeholder - return None for now
-        return None
-
-    async def get_srt_result(self, task_id: str) -> Optional[str]:
-        # Placeholder - return None for now
-        return None
-
-    async def get_vtt_result(self, task_id: str) -> Optional[str]:
-        # Placeholder - return None for now
-        return None
-
-    async def get_txt_result(self, task_id: str) -> Optional[str]:
-        # Placeholder - return None for now
-        return None
-
-    async def detect_language(self, file_id: str) -> languageDetectionModel:
-        return languageDetectionModel(file_id=file_id, language="en", confidence=0.9)
-
-
-import uuid
-from datetime import datetime
-
+# Create FastAPI app
 app = FastAPI(
     title="Advanced Transcription Service",
     description="A comprehensive transcription service with diarization, VAD, and preprocessing",
@@ -150,7 +67,11 @@ async def startup_event():
     file_service = FileService(db)
     ray_client = RayClient()
     await ray_client.connect()
-    transcription_service = SimpleTranscriptionService(db, ray_client)
+
+    # Use Hybrid Ray Jobs + Actors approach
+    transcription_service = HybridTranscriptionService(db, ray_client)
+
+    print("✅ API service initialized with Ray Serve integration")
 
 
 @app.on_event("shutdown")
@@ -163,14 +84,37 @@ async def shutdown_event():
         await ray_client.disconnect()
 
 
-# Health check endpoint
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "transcription-api"}
+    # Check Ray Serve health
+    ray_serve_healthy = False
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get("http://localhost:8000/health")
+            ray_serve_healthy = response.status_code == 200
+    except:
+        ray_serve_healthy = False
+
+    return {
+        "status": "healthy",
+        "service": "transcription-api",
+        "ray_serve_available": ray_serve_healthy,
+    }
 
 
-# File management endpoints
+# =============================================================================
+# FILE MANAGEMENT ENDPOINTS
+# =============================================================================
+
+
 @app.post("/files/upload", response_model=FileResponse)
 async def upload_file(file: UploadFile = File(...)):
     """Upload a file and return its ID."""
@@ -222,20 +166,11 @@ async def delete_file(file_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
 
 
-# Language detection endpoint
-@app.post("/detect-language", response_model=languageDetectionModel)
-async def detect_language(file_id: str):
-    """Detect the language of an audio file."""
-    try:
-        result = await transcription_service.detect_language(file_id)
-        return result
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Language detection failed: {str(e)}"
-        )
+# =============================================================================
+# TRANSCRIPTION ENDPOINTS
+# =============================================================================
 
 
-# Transcription endpoints
 @app.post("/transcribe", response_model=TranscriptionRespModel)
 async def transcribe_audio(request: TranscriptionReqModel):
     """Start a transcription task."""
@@ -245,7 +180,7 @@ async def transcribe_audio(request: TranscriptionReqModel):
             **request.dict(),
             id=task_id,
             status="pending",
-            message="Transcription task started",
+            message="Transcription task started using Ray Serve",
         )
     except Exception as e:
         raise HTTPException(
@@ -270,7 +205,7 @@ async def transcribe_from_url(request: TranscriptionURLReqModel):
             asr_format=request.asr_format,
             id=task_id,
             status="pending",
-            message="Transcription task started from URL",
+            message="Transcription task started from URL using Ray Serve",
         )
     except Exception as e:
         raise HTTPException(
@@ -278,7 +213,29 @@ async def transcribe_from_url(request: TranscriptionURLReqModel):
         )
 
 
-# Task management endpoints
+@app.post("/detect-language", response_model=languageDetectionModel)
+async def detect_language(request: dict):
+    """Detect the language of an audio file."""
+    try:
+        file_id = request.get("file_id")
+        if not file_id:
+            raise HTTPException(status_code=400, detail="file_id is required")
+
+        result = await transcription_service.detect_language(file_id)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Language detection failed: {str(e)}"
+        )
+
+
+# =============================================================================
+# TASK MANAGEMENT ENDPOINTS
+# =============================================================================
+
+
 @app.get("/tasks", response_model=TasksRespModel)
 async def list_tasks(skip: int = 0, limit: int = 100):
     """List all tasks."""
@@ -316,7 +273,11 @@ async def cancel_task(task_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to cancel task: {str(e)}")
 
 
-# Result endpoints
+# =============================================================================
+# RESULT ENDPOINTS
+# =============================================================================
+
+
 @app.get("/results/{task_id}/json", response_model=JSONModel)
 async def get_json_result(task_id: str):
     """Get transcription result in JSON format."""
@@ -401,6 +362,10 @@ async def get_txt_result(task_id: str):
             status_code=500, detail=f"Failed to get TXT result: {str(e)}"
         )
 
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn

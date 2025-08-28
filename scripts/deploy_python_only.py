@@ -2,56 +2,54 @@
 """
 scripts/deploy_python_only.py
 
-Deployment completamente en Python sin YAML config.
+Deployment usando Ray Jobs para ver driver logs.
 """
 
 import os
 import sys
 import time
-import ray
-from ray import serve
 from pathlib import Path
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 
-def deploy_transcription_service():
-    """Deploy transcription service usando solo Python API."""
+def deploy_as_ray_job():
+    """Deploy usando Ray Job submission para tener driver logs visibles."""
 
-    print("🚀 Starting transcription service deployment (Python-only)...")
+    print("🚀 Deploying transcription service as Ray Job...")
+
+    # Este script se ejecutará como un Ray Job
+    # Los logs serán visibles en el Ray Dashboard
 
     try:
-        # Initialize Ray
+        import ray
+        from ray import serve
+
+        # Initialize Ray (ya debería estar inicializado como parte del job)
         if not ray.is_initialized():
-            ray.init(
-                address="ray://ray-head:10001",
-                ignore_reinit_error=True,
-                log_to_driver=True,
-            )
-        print("✅ Connected to Ray cluster")
+            ray.init(address="ray://ray-head:10001")
+
+        print("✅ Ray initialized within job")
 
         # Start Ray Serve
         try:
-            serve.start(detached=True, http_options={"host": "0.0.0.0", "port": 8000})
-            print("✅ Ray Serve started")
+            serve.start(detached=False)  # No detached para job
+            print("✅ Ray Serve started within job")
         except Exception as e:
-            print(f"⚠️  Ray Serve already running: {e}")
-
-        # Wait for cluster to be ready
-        print("⏳ Waiting for cluster to be ready...")
-        time.sleep(5)
+            print(f"⚠️  Ray Serve start: {e}")
 
         # Import deployments
+        print("📦 Importing deployments...")
         from src.deployments.ray_serve_models import (
             TranscriptionService,
             LanguageDetectionService,
             FastAPITranscriptionApp,
         )
 
-        print("🏗️ Creating deployments...")
+        print("🏗️ Creating deployments within job...")
 
-        # Create individual deployments with configuration
+        # Create deployments with explicit configuration
         transcription_deployment = TranscriptionService.options(
             name="TranscriptionService",
             num_replicas=1,
@@ -68,127 +66,73 @@ def deploy_transcription_service():
             ray_actor_options={"num_cpus": 1, "memory": 2_000_000_000},
         ).bind(model_cache_path="/app/models", whisper_model="base")
 
-        # Create main FastAPI app
+        # Create FastAPI app
         app_deployment = FastAPITranscriptionApp.options(
             name="TranscriptionAPIGateway",
             num_replicas=1,
             ray_actor_options={"num_cpus": 1, "memory": 1_000_000_000},
         ).bind(transcription_deployment, language_detection_deployment)
 
-        print("🚀 Deploying application...")
+        print("🚀 Deploying application within job...")
 
         # Deploy the application
         serve.run(
             app_deployment,
             name="transcription-service",
             route_prefix="/",
-            blocking=False,
+            blocking=True,  # Block to keep job alive
+            host="0.0.0.0",
+            port=8000,
         )
 
-        print("✅ Deployment successful!")
-        print("🌐 Service endpoints:")
-        print("  • Health: http://localhost:8000/health")
-        print("  • Transcribe: http://localhost:8000/transcribe")
-        print("  • Language Detection: http://localhost:8000/detect-language")
-        print("  • Ray Dashboard: http://localhost:8265")
+        print("✅ Deployment successful within Ray Job!")
 
-        # Wait for deployments to be ready
-        print("⏳ Waiting for deployments to be healthy...")
-        max_wait = 300  # 5 minutes
-        start_time = time.time()
+        # Keep job running
+        print("🔄 Job running... Service deployed and accessible")
 
-        while time.time() - start_time < max_wait:
+        # Monitor loop within job
+        while True:
             try:
+                print(f"📊 Job heartbeat: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+                # Check service health
                 status = serve.status()
                 apps = status.applications
 
                 if "transcription-service" in apps:
                     app_status = apps["transcription-service"]
-                    print(f"📊 App status: {app_status.status}")
+                    print(f"📈 Service status: {app_status.status}")
 
-                    if app_status.status == "RUNNING":
-                        print("✅ All deployments are healthy!")
-                        break
+                    # Test endpoint
+                    try:
+                        import requests
 
-                    # Show deployment details
-                    for (
-                        deployment_name,
-                        deployment_info,
-                    ) in app_status.deployments.items():
-                        print(f"  • {deployment_name}: {deployment_info.status}")
+                        response = requests.get(
+                            "http://localhost:8000/health", timeout=5
+                        )
+                        if response.status_code == 200:
+                            print("🟢 Health check: OK")
+                        else:
+                            print(f"🔴 Health check: {response.status_code}")
+                    except Exception as e:
+                        print(f"🔴 Health check failed: {e}")
 
-                time.sleep(10)
+                else:
+                    print("❌ Service not found in applications")
+
+                time.sleep(60)  # Check every minute
 
             except Exception as e:
-                print(f"⚠️  Error checking status: {e}")
-                time.sleep(5)
-
-        # Test the service
-        print("🧪 Testing service...")
-        try:
-            import requests
-
-            response = requests.get("http://localhost:8000/health", timeout=10)
-            if response.status_code == 200:
-                print("✅ Health check passed!")
-                print(f"📋 Response: {response.json()}")
-            else:
-                print(f"⚠️  Health check returned: {response.status_code}")
-        except Exception as e:
-            print(f"⚠️  Could not test service: {e}")
-
-        # Final status check and exit
-        print("🔄 Final status check...")
-        time.sleep(10)  # Give deployments time to stabilize
-
-        try:
-            status = serve.status()
-            apps = status.applications
-
-            if "transcription-service" in apps:
-                app_status = apps["transcription-service"]
-                print(f"📈 Final service status: {app_status.status}")
-
-                # Count healthy replicas
-                healthy_count = 0
-                total_count = 0
-
-                for deployment_name, deployment_info in app_status.deployments.items():
-                    total_count += 1
-                    if deployment_info.status == "HEALTHY":
-                        healthy_count += 1
-                    print(f"  • {deployment_name}: {deployment_info.status}")
-
-                print(f"📊 Healthy deployments: {healthy_count}/{total_count}")
-
-                if healthy_count == total_count and app_status.status == "RUNNING":
-                    print("✅ Deployment completed successfully!")
-                    print("🔄 Service is now running in detached mode")
-                    return True
-                else:
-                    print("⚠️  Some deployments may not be ready yet")
-                    print("💡 Use 'make health' or 'make ray-status' to check status")
-                    return True  # Still consider it successful as it's running
-            else:
-                print("❌ Application not found in status")
-                return False
-
-        except Exception as e:
-            print(f"❌ Error in final status check: {e}")
-            print("⚠️  Deployment may still be successful - check manually")
-            return True
+                print(f"❌ Error in monitoring: {e}")
+                time.sleep(10)
 
     except Exception as e:
-        print(f"❌ Deployment failed: {e}")
+        print(f"❌ Job deployment failed: {e}")
         import traceback
 
         traceback.print_exc()
-        return False
-
-    return True
+        raise
 
 
 if __name__ == "__main__":
-    success = deploy_transcription_service()
-    if not success:
-        sys.exit(1)
+    deploy_as_ray_job()

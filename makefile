@@ -61,12 +61,17 @@ build:
 	@echo "🏗️ Building Docker images..."
 	@docker compose build --parallel
 
-# Deploy models (Python-only approach)
+# Deploy models (Hybrid: Ray Jobs + Actors)
 deploy:
-	@echo "🤖 Deploying Ray Serve models (Python-only)..."
+	@echo "🚀 Preparing hybrid transcription service..."
+	@docker compose exec ray-head python /app/scripts/deploy_hybrid.py
+
+# Deploy using direct Python (legacy)
+deploy-direct:
+	@echo "🤖 Deploying Ray Serve models (direct Python)..."
 	@docker compose exec ray-head python /app/scripts/deploy_python_only.py
 
-# Deploy using Ray Job submission
+# Deploy using Ray Job submission (alternative)
 deploy-job:
 	@echo "🚀 Deploying using Ray Job submission..."
 	@docker compose exec ray-head /app/scripts/job_management.sh submit
