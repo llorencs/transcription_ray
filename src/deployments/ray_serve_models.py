@@ -35,22 +35,22 @@ class LanguageDetectionRequest(BaseModel):
 
 @serve.deployment(
     num_replicas=1,
-    ray_actor_options={"num_gpus": 1, "num_cpus": 2, "memory": 8_000_000_000},
+    ray_actor_options={
+        "num_gpus": 1,
+        "num_cpus": 2,
+        "memory": 8_000_000_000,
+    },  # Full GPU for transcription
 )
 class TranscriptionService:
-    def __init__(self):
-        # Try to get config from user_config (both YAML and programmatic)
-        try:
-            user_config = (
-                serve.get_replica_context().deployment_config.user_config or {}
-            )
-        except:
-            # Fallback if replica context is not available
-            user_config = {}
-
-        self.model_cache_path = user_config.get("model_cache_path", "/app/models")
-        self.default_model = user_config.get("default_whisper_model", "base")
-        self.enable_diarization = user_config.get("enable_diarization", True)
+    def __init__(
+        self,
+        model_cache_path="/app/models",
+        default_whisper_model="base",
+        enable_diarization=True,
+    ):
+        self.model_cache_path = model_cache_path
+        self.default_model = default_whisper_model
+        self.enable_diarization = enable_diarization
 
         print(
             f"TranscriptionService initializing with: cache={self.model_cache_path}, "
@@ -229,35 +229,27 @@ class TranscriptionService:
 
 @serve.deployment(
     num_replicas=1,
-    ray_actor_options={"num_gpus": 0.5, "num_cpus": 1, "memory": 4_000_000_000},
+    ray_actor_options={"num_cpus": 1, "memory": 2_000_000_000},  # Reduced memory to 2GB
 )
 class LanguageDetectionService:
-    def __init__(self):
-        # Try to get config from user_config (both YAML and programmatic)
-        try:
-            user_config = (
-                serve.get_replica_context().deployment_config.user_config or {}
-            )
-        except:
-            # Fallback if replica context is not available
-            user_config = {}
-
-        self.model_cache_path = user_config.get("model_cache_path", "/app/models")
-        self.whisper_model_size = user_config.get("whisper_model", "base")
+    def __init__(self, model_cache_path="/app/models", whisper_model="base"):
+        self.model_cache_path = model_cache_path
+        self.whisper_model_size = whisper_model
 
         print(
             f"LanguageDetectionService initializing with: cache={self.model_cache_path}, "
-            f"model={self.whisper_model_size}"
+            f"model={self.whisper_model_size} (CPU-only)"
         )
 
         self.whisper_model = None
         self._load_model()
 
     def _load_model(self):
-        """Load Whisper model for language detection."""
+        """Load Whisper model for language detection on CPU."""
         try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
+            # Always use CPU for language detection - it's fast enough and saves GPU resources
+            device = "cpu"
+            compute_type = "int8"  # Most efficient for CPU
 
             self.whisper_model = WhisperModel(
                 self.whisper_model_size,
@@ -267,30 +259,44 @@ class LanguageDetectionService:
             )
 
             print(
-                f"Loaded Whisper {self.whisper_model_size} for language detection on {device}"
+                f"✅ Loaded Whisper {self.whisper_model_size} for language detection on CPU"
             )
 
         except Exception as e:
-            print(f"Failed to load language detection model: {e}")
+            print(f"❌ Failed to load language detection model: {e}")
             raise
 
     def detect_language(self, request: LanguageDetectionRequest):
-        """Language detection endpoint."""
+        """Language detection endpoint - optimized for CPU."""
         try:
-            # Load first 30 seconds for language detection
+            # For language detection, we only need to process a small portion of the audio
+            # Whisper can detect language from the first few seconds efficiently
             segments, info = self.whisper_model.transcribe(
                 request.audio_path,
-                language=None,
+                language=None,  # Auto-detect
                 vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=500),
+                # Only process first 30 seconds for language detection
+                condition_on_previous_text=False,  # Faster processing
             )
 
-            # Consume first segment to get language info
-            first_segment = next(segments, None)
+            # We don't need to process all segments, just get the language info
+            # The language detection happens early in the transcription process
+            first_segment = next(segments, None)  # This triggers language detection
 
-            return {"language": info.language, "confidence": info.language_probability}
+            result = {
+                "language": info.language,
+                "confidence": info.language_probability,
+            }
+
+            print(
+                f"🔍 Language detected: {info.language} (confidence: {info.language_probability:.3f})"
+            )
+
+            return result
 
         except Exception as e:
+            print(f"❌ Language detection failed: {e}")
             raise HTTPException(
                 status_code=500, detail=f"Language detection failed: {str(e)}"
             )
@@ -365,23 +371,18 @@ def build_app_with_fastapi(args: dict):
     print(f"  enable_diarization: {enable_diarization}")
     print(f"  whisper_model: {whisper_model}")
 
-    # Create both service deployments with unique names
+    # Create both service deployments with parameters passed directly to constructors
     transcription_service = TranscriptionService.options(
-        name="TranscriptionServiceBackend",  # Unique name
-        user_config={
-            "model_cache_path": model_cache_path,
-            "default_whisper_model": default_whisper_model,
-            "enable_diarization": enable_diarization,
-        },
-    ).bind()
+        name="TranscriptionServiceBackend"
+    ).bind(
+        model_cache_path=model_cache_path,
+        default_whisper_model=default_whisper_model,
+        enable_diarization=enable_diarization,
+    )
 
     language_detection_service = LanguageDetectionService.options(
-        name="LanguageDetectionServiceBackend",  # Unique name
-        user_config={
-            "model_cache_path": model_cache_path,
-            "whisper_model": whisper_model,
-        },
-    ).bind()
+        name="LanguageDetectionServiceBackend"
+    ).bind(model_cache_path=model_cache_path, whisper_model=whisper_model)
 
     # Return FastAPI ingress that can access both services
     return FastAPITranscriptionApp.options(name="TranscriptionAPIGateway").bind(
