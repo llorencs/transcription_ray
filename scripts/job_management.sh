@@ -27,16 +27,17 @@ function show_help() {
 
 function submit_job() {
     echo "🚀 Submitting transcription service job..."
-    JOB_NAME="transcription-service-$(date +%Y%m%d-%H%M%S)"
+    JOB_SUBMISSION_ID="transcription-service-$(date +%Y%m%d-%H%M%S)"
     
+    # FIXED: Use --submission-id instead of --job-name
     ray job submit \
         --address="$RAY_ADDRESS" \
-        --job-name="$JOB_NAME" \
+        --submission-id="$JOB_SUBMISSION_ID" \
         --working-dir="/app" \
         --runtime-env-json='{"working_dir": "/app", "pip": ["fastapi", "uvicorn"]}' \
         -- python /app/scripts/ray_job_deployment.py
         
-    echo "✅ Job '$JOB_NAME' submitted"
+    echo "✅ Job '$JOB_SUBMISSION_ID' submitted"
     echo "📊 Monitor with: $0 logs"
 }
 
@@ -49,12 +50,14 @@ function show_logs() {
     echo "📝 Getting latest job logs..."
     
     # Get the latest transcription service job
-    LATEST_JOB=$(ray job list --address="$RAY_ADDRESS" --format json | \
-        jq -r '.[] | select(.job_name | contains("transcription-service")) | .job_id' | \
+    LATEST_JOB=$(ray job list --address="$RAY_ADDRESS" --format json 2>/dev/null | \
+        jq -r '.[] | select(.submission_id | test("transcription-service")) | .submission_id' 2>/dev/null | \
         head -1)
     
     if [ -z "$LATEST_JOB" ]; then
         echo "❌ No transcription service jobs found"
+        echo "Available jobs:"
+        ray job list --address="$RAY_ADDRESS"
         return 1
     fi
     
@@ -65,12 +68,14 @@ function show_logs() {
 function show_status() {
     echo "📊 Job Status:"
     
-    LATEST_JOB=$(ray job list --address="$RAY_ADDRESS" --format json | \
-        jq -r '.[] | select(.job_name | contains("transcription-service")) | .job_id' | \
+    LATEST_JOB=$(ray job list --address="$RAY_ADDRESS" --format json 2>/dev/null | \
+        jq -r '.[] | select(.submission_id | test("transcription-service")) | .submission_id' 2>/dev/null | \
         head -1)
     
     if [ -z "$LATEST_JOB" ]; then
         echo "❌ No transcription service jobs found"
+        echo "Available jobs:"
+        ray job list --address="$RAY_ADDRESS"
         return 1
     fi
     
@@ -80,8 +85,8 @@ function show_status() {
 function stop_job() {
     echo "🛑 Stopping latest transcription service job..."
     
-    LATEST_JOB=$(ray job list --address="$RAY_ADDRESS" --format json | \
-        jq -r '.[] | select(.job_name | contains("transcription-service")) | .job_id' | \
+    LATEST_JOB=$(ray job list --address="$RAY_ADDRESS" --format json 2>/dev/null | \
+        jq -r '.[] | select(.submission_id | test("transcription-service")) | .submission_id' 2>/dev/null | \
         head -1)
     
     if [ -z "$LATEST_JOB" ]; then
@@ -97,8 +102,8 @@ function cleanup_jobs() {
     echo "🧹 Cleaning up old jobs..."
     
     # List all transcription service jobs
-    OLD_JOBS=$(ray job list --address="$RAY_ADDRESS" --format json | \
-        jq -r '.[] | select(.job_name | contains("transcription-service")) | select(.status == "SUCCEEDED" or .status == "FAILED") | .job_id')
+    OLD_JOBS=$(ray job list --address="$RAY_ADDRESS" --format json 2>/dev/null | \
+        jq -r '.[] | select(.submission_id | test("transcription-service")) | select(.status == "SUCCEEDED" or .status == "FAILED") | .submission_id' 2>/dev/null)
     
     if [ -z "$OLD_JOBS" ]; then
         echo "ℹ️  No old jobs to clean up"

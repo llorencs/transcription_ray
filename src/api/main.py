@@ -24,7 +24,9 @@ from src.models.files import FileResponse, FilesResponse
 from src.models.pydantic_models import ASRModel, JSONModel
 from src.database.mongodb import MongoDB
 from src.services.file_service import FileService
-from src.services.transcription_service_simple import SimpleTranscriptionService
+from src.services.transcription_service_simple import (
+    SimpleTranscriptionService,
+)  # FIXED: Use SimpleTranscriptionService
 from src.utils.ray_client import RayClient
 
 # Create FastAPI app
@@ -71,7 +73,7 @@ async def startup_event():
     # Use Simple Ray Tasks approach (more reliable)
     transcription_service = SimpleTranscriptionService(db, ray_client)
 
-    print("✅ API service initialized with Ray Serve integration")
+    print("✅ API service initialized with Simple Transcription Service")
 
 
 @app.on_event("shutdown")
@@ -180,7 +182,7 @@ async def transcribe_audio(request: TranscriptionReqModel):
             **request.dict(),
             id=task_id,
             status="pending",
-            message="Transcription task started using Ray Serve",
+            message="Transcription task started using Simple Ray Tasks",
         )
     except Exception as e:
         raise HTTPException(
@@ -205,7 +207,7 @@ async def transcribe_from_url(request: TranscriptionURLReqModel):
             asr_format=request.asr_format,
             id=task_id,
             status="pending",
-            message="Transcription task started from URL using Ray Serve",
+            message="Transcription task started from URL",
         )
     except Exception as e:
         raise HTTPException(
@@ -298,9 +300,15 @@ async def get_asr_result(task_id: str):
     try:
         result = await transcription_service.get_asr_result(task_id)
         if not result:
-            raise HTTPException(status_code=404, detail="Result not found")
+            raise HTTPException(status_code=404, detail="ASR result not found")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Error in ASR endpoint: {e}")
+        import traceback
+
+        traceback.print_exc()
         raise HTTPException(
             status_code=500, detail=f"Failed to get ASR result: {str(e)}"
         )
@@ -311,15 +319,21 @@ async def get_srt_result(task_id: str):
     """Get transcription result in SRT format."""
     try:
         srt_content = await transcription_service.get_srt_result(task_id)
-        if not srt_content:
-            raise HTTPException(status_code=404, detail="Result not found")
+        if srt_content is None:
+            raise HTTPException(status_code=404, detail="SRT result not found")
 
         return StreamingResponse(
             io.StringIO(srt_content),
             media_type="text/plain",
             headers={"Content-Disposition": f"attachment; filename={task_id}.srt"},
         )
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Error in SRT endpoint: {e}")
+        import traceback
+
+        traceback.print_exc()
         raise HTTPException(
             status_code=500, detail=f"Failed to get SRT result: {str(e)}"
         )
@@ -349,15 +363,21 @@ async def get_txt_result(task_id: str):
     """Get transcription result in plain text format."""
     try:
         txt_content = await transcription_service.get_txt_result(task_id)
-        if not txt_content:
-            raise HTTPException(status_code=404, detail="Result not found")
+        if txt_content is None:
+            raise HTTPException(status_code=404, detail="TXT result not found")
 
         return StreamingResponse(
             io.StringIO(txt_content),
             media_type="text/plain",
             headers={"Content-Disposition": f"attachment; filename={task_id}.txt"},
         )
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Error in TXT endpoint: {e}")
+        import traceback
+
+        traceback.print_exc()
         raise HTTPException(
             status_code=500, detail=f"Failed to get TXT result: {str(e)}"
         )

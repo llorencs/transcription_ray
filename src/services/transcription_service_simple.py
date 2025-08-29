@@ -18,7 +18,13 @@ from src.models.videotools_model import (
     TaskRespModel,
     languageDetectionModel,
 )
-from src.models.pydantic_models import JSONModel, ASRModel, WordModel, SegmentModel
+from src.models.pydantic_models import (
+    JSONModel,
+    ASRModel,
+    WordModel,
+    SegmentModel,
+    EventModel,
+)
 from src.database.mongodb import MongoDB
 from src.utils.ray_client import RayClient
 
@@ -183,7 +189,14 @@ class SimpleTranscriptionService:
 
             # Ensure Ray is initialized
             if not ray.is_initialized():
-                ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                try:
+                    ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                    print("✅ Ray initialized")
+                except Exception as e:
+                    print(f"❌ Ray initialization failed: {e}")
+                    # Try local initialization as fallback
+                    ray.init(ignore_reinit_error=True)
+                    print("✅ Ray initialized locally")
 
             # Submit Ray task
             task_config = {
@@ -289,12 +302,18 @@ class SimpleTranscriptionService:
             vtt_content = subtitle_formatter.to_vtt(segments)
             txt_content = ray_result.get("text", "")
 
+            # Create ASR result if requested
+            asr_result = None
+            if request.asr_format:
+                asr_result = self._create_asr_result(ray_result, request.model)
+
             # Store results
             result_data = {
                 "json_result": json_result.dict(),
                 "srt_content": srt_content,
                 "vtt_content": vtt_content,
                 "txt_content": txt_content,
+                "asr_result": asr_result.dict() if asr_result else None,
                 "ray_result": ray_result,
             }
 
@@ -303,6 +322,55 @@ class SimpleTranscriptionService:
         except Exception as e:
             print(f"❌ Error storing results for task {task_id}: {e}")
             raise
+
+    def _create_asr_result(self, ray_result: dict, model: str) -> ASRModel:
+        """Create ASR format result from ray result."""
+        try:
+            # Convert words to events
+            events = []
+
+            for word in ray_result.get("words", []):
+                event = EventModel(
+                    content=word["text"],
+                    start_time=word["start"],
+                    end_time=word["end"],
+                    event_type="word",
+                    language=ray_result.get("language"),
+                    confidence=word.get("confidence"),
+                    speaker=word.get("speaker"),
+                    is_eol=False,
+                    is_eos=False,
+                )
+                events.append(event)
+
+            return ASRModel(
+                asr_model=model,
+                created_at=datetime.utcnow().isoformat(),
+                generated_by="advanced-transcription-service",
+                version=1,
+                events=events,
+                language=ray_result.get("language"),
+                language_probability=ray_result.get("language_probability"),
+                duration=ray_result.get("duration"),
+                processing_info={
+                    "model": model,
+                    "segments_count": len(ray_result.get("segments", [])),
+                    "words_count": len(ray_result.get("words", [])),
+                },
+            )
+
+        except Exception as e:
+            print(f"Error creating ASR result: {e}")
+            # Return empty ASR result as fallback
+            return ASRModel(
+                asr_model=model,
+                created_at=datetime.utcnow().isoformat(),
+                generated_by="advanced-transcription-service",
+                version=1,
+                events=[],
+                language=ray_result.get("language", "en"),
+                language_probability=ray_result.get("language_probability", 0.5),
+            )
 
     async def detect_language(self, file_id: str) -> languageDetectionModel:
         """Detect language using simple Ray task."""
@@ -355,7 +423,10 @@ class SimpleTranscriptionService:
 
             # Ensure Ray is initialized
             if not ray.is_initialized():
-                ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                try:
+                    ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                except:
+                    ray.init(ignore_reinit_error=True)
 
             # Submit and get result
             future = language_detection_task.remote(str(temp_path))
@@ -424,31 +495,99 @@ class SimpleTranscriptionService:
 
     async def get_asr_result(self, task_id: str) -> Optional[ASRModel]:
         """Get ASR result for task."""
-        result = await self.db.get_result(task_id)
-        if not result or not result["result_data"].get("asr_result"):
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            asr_data = result["result_data"].get("asr_result")
+            if not asr_data:
+                # Generate ASR result on the fly if not available
+                ray_result = result["result_data"].get("ray_result", {})
+                if ray_result:
+                    asr_result = self._create_asr_result(ray_result, "base")
+                    return asr_result
+                return None
+
+            return ASRModel(**asr_data)
+        except Exception as e:
+            print(f"Error getting ASR result: {e}")
             return None
-        return ASRModel(**result["result_data"]["asr_result"])
 
     async def get_srt_result(self, task_id: str) -> Optional[str]:
         """Get SRT result."""
-        result = await self.db.get_result(task_id)
-        if not result:
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            srt_content = result["result_data"].get("srt_content")
+            if not srt_content:
+                # Generate SRT on the fly if not available
+                json_result = result["result_data"].get("json_result")
+                if json_result:
+                    from src.utils.subtitle_formats import SubtitleFormatter
+
+                    json_model = JSONModel(**json_result)
+                    subtitle_formatter = SubtitleFormatter()
+                    srt_content = subtitle_formatter.to_srt(json_model.segments)
+                    return srt_content
+                return ""
+
+            return srt_content
+        except Exception as e:
+            print(f"Error getting SRT result: {e}")
             return None
-        return result["result_data"].get("srt_content")
 
     async def get_vtt_result(self, task_id: str) -> Optional[str]:
         """Get VTT result."""
-        result = await self.db.get_result(task_id)
-        if not result:
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            vtt_content = result["result_data"].get("vtt_content")
+            if not vtt_content:
+                # Generate VTT on the fly if not available
+                json_result = result["result_data"].get("json_result")
+                if json_result:
+                    from src.utils.subtitle_formats import SubtitleFormatter
+
+                    json_model = JSONModel(**json_result)
+                    subtitle_formatter = SubtitleFormatter()
+                    vtt_content = subtitle_formatter.to_vtt(json_model.segments)
+                    return vtt_content
+                return ""
+
+            return vtt_content
+        except Exception as e:
+            print(f"Error getting VTT result: {e}")
             return None
-        return result["result_data"].get("vtt_content")
 
     async def get_txt_result(self, task_id: str) -> Optional[str]:
         """Get TXT result."""
-        result = await self.db.get_result(task_id)
-        if not result:
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            txt_content = result["result_data"].get("txt_content")
+            if not txt_content:
+                # Generate TXT on the fly if not available
+                json_result = result["result_data"].get("json_result")
+                if json_result:
+                    return json_result.get("text", "")
+
+                ray_result = result["result_data"].get("ray_result")
+                if ray_result:
+                    return ray_result.get("text", "")
+
+                return ""
+
+            return txt_content
+        except Exception as e:
+            print(f"Error getting TXT result: {e}")
             return None
-        return result["result_data"].get("txt_content")
 
     # URL transcription (simplified)
     async def start_transcription_from_url(

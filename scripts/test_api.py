@@ -112,6 +112,9 @@ def download_results(task_id: str, output_dir: str = "test_results"):
 
     formats = {"json": "json", "asr": "json", "srt": "srt", "vtt": "vtt", "txt": "txt"}
 
+    success_count = 0
+    total_count = len(formats)
+
     for format_name, extension in formats.items():
         try:
             response = requests.get(f"{API_BASE_URL}/results/{task_id}/{format_name}")
@@ -129,11 +132,23 @@ def download_results(task_id: str, output_dir: str = "test_results"):
                         f.write(response.text)
 
                 print(f"✓ Downloaded {format_name}: {output_file}")
+                success_count += 1
             else:
                 print(f"❌ Failed to download {format_name}: {response.status_code}")
+                if response.status_code == 500:
+                    try:
+                        error_detail = response.json()
+                        print(
+                            f"    Error details: {error_detail.get('detail', 'Unknown error')}"
+                        )
+                    except:
+                        print(f"    Server error: {response.text}")
 
         except Exception as e:
             print(f"❌ Error downloading {format_name}: {e}")
+
+    print(f"\n📊 Download Results: {success_count}/{total_count} successful")
+    return success_count == total_count
 
 
 def test_language_detection(file_id: str):
@@ -199,6 +214,8 @@ def run_full_test(
     print(f"Preprocessing: {with_preprocessing}")
     print(f"{'='*60}\n")
 
+    overall_success = True
+
     try:
         # Test 1: Health check
         test_health_check()
@@ -209,7 +226,9 @@ def run_full_test(
             return False
 
         # Test 3: Language detection
-        test_language_detection(file_id)
+        lang_result = test_language_detection(file_id)
+        if not lang_result:
+            overall_success = False
 
         # Test 4: Start transcription
         task_id = start_transcription(
@@ -223,17 +242,28 @@ def run_full_test(
             return False
 
         # Test 6: Download results
-        download_results(task_id)
+        download_success = download_results(task_id)
+        if not download_success:
+            overall_success = False
+            print("⚠️  Some result downloads failed")
 
         # Test 7: File and task management
-        test_file_management()
-        test_task_management()
+        files = test_file_management()
+        tasks = test_task_management()
+
+        if not files:
+            overall_success = False
+        if not tasks:
+            overall_success = False
 
         print(f"\n{'='*60}")
-        print("✓ All tests passed successfully!")
+        if overall_success:
+            print("✅ All tests passed successfully!")
+        else:
+            print("⚠️  Tests completed with some failures!")
         print(f"{'='*60}\n")
 
-        return True
+        return overall_success
 
     except Exception as e:
         print(f"\n❌ Test failed with error: {e}")

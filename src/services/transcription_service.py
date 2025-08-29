@@ -311,14 +311,15 @@ if __name__ == "__main__":
                 f.write(job_script_content)
                 script_path = f.name
 
-            # Submit job using ray job submit command
+            # Submit job using ray job submit command - FIXED: Use --submission-id instead of --job-name
+            submission_id = f"transcription-{config['task_id'][:8]}"
             cmd = [
                 "ray",
                 "job",
                 "submit",
                 "--address=ray://ray-head:10001",
                 "--working-dir=/app",
-                f'--job-name=transcription-{config["task_id"][:8]}',
+                f"--submission-id={submission_id}",  # FIXED: Changed from --job-name to --submission-id
                 "--",
                 "python",
                 script_path,
@@ -333,23 +334,18 @@ if __name__ == "__main__":
                 # Extract job ID from output
                 output_lines = result.stdout.strip().split("\n")
                 for line in output_lines:
-                    if "Job" in line and "submitted" in line:
-                        # Extract job ID from line like "Job 'raysubmit_XYZ' submitted successfully"
-                        import re
+                    if "submitted successfully" in line:
+                        print(f"✅ Ray Job submitted successfully")
+                        # Use the submission_id as the job_id
+                        return submission_id
 
-                        match = re.search(r"Job '([^']+)'", line)
-                        if match:
-                            job_id = match.group(1)
-                            print(f"✅ Ray Job submitted successfully: {job_id}")
-                            return job_id
-
-                # Fallback - use task ID as job ID
-                job_id = f"transcription-{config['task_id'][:8]}"
-                print(f"✅ Ray Job submitted (fallback ID): {job_id}")
-                return job_id
+                # Fallback - use submission_id
+                print(f"✅ Ray Job submitted (using submission_id): {submission_id}")
+                return submission_id
             else:
                 error_msg = f"ray job submit failed: {result.stderr}"
                 print(f"❌ {error_msg}")
+                print(f"❌ stdout: {result.stdout}")
                 raise Exception(error_msg)
 
         except Exception as e:
@@ -411,7 +407,7 @@ if __name__ == "__main__":
                                 if logs_result.returncode == 0
                                 else "Could not retrieve logs"
                             )
-                            error_msg = f"Ray Job failed\\nLogs:\\n{logs}"
+                            error_msg = f"Ray Job failed\nLogs:\n{logs}"
 
                             await self.db.update_task(
                                 task_id,
@@ -596,10 +592,6 @@ if __name__ == "__main__":
             )
             for task in tasks
         ]
-        success = await self.db.update_task(
-            task_id, {"status": "cancelled", "cancelled_at": datetime.utcnow()}
-        )
-        return success
 
     # Result retrieval methods (same as before)
     async def get_json_result(self, task_id: str) -> Optional[JSONModel]:
