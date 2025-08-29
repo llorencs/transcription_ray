@@ -24,7 +24,7 @@ from src.models.files import FileResponse, FilesResponse
 from src.models.pydantic_models import ASRModel, JSONModel
 from src.database.mongodb import MongoDB
 from src.services.file_service import FileService
-from src.services.transcription_service import HybridTranscriptionService
+from src.services.transcription_service_simple import SimpleTranscriptionService
 from src.utils.ray_client import RayClient
 
 # Create FastAPI app
@@ -68,8 +68,8 @@ async def startup_event():
     ray_client = RayClient()
     await ray_client.connect()
 
-    # Use Hybrid Ray Jobs + Actors approach
-    transcription_service = HybridTranscriptionService(db, ray_client)
+    # Use Simple Ray Tasks approach (more reliable)
+    transcription_service = SimpleTranscriptionService(db, ray_client)
 
     print("✅ API service initialized with Ray Serve integration")
 
