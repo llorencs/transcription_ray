@@ -91,6 +91,16 @@ class SimpleTranscriptionService:
             with open(temp_path, "wb") as f:
                 f.write(file_data)
 
+            # Verify the file was written correctly
+            if not temp_path.exists():
+                raise Exception("Failed to create temporary file")
+
+            file_size = temp_path.stat().st_size
+            print(f"📁 Temp file created: {temp_path} ({file_size} bytes)")
+
+            if file_size == 0:
+                raise Exception("Temporary file is empty")
+
             print(f"🚀 Starting Ray task for transcription: {task_id}")
 
             # Create Ray task for transcription
@@ -98,15 +108,26 @@ class SimpleTranscriptionService:
             def transcription_task(audio_path: str, config: dict):
                 try:
                     import sys
+                    import os
 
                     sys.path.append("/app/src")
-
-                    from faster_whisper import WhisperModel
-                    import torch
 
                     print(f"🎯 Processing audio: {audio_path}")
                     print(f"🤖 Model: {config['model']}")
                     print(f"🔧 GPU: {config['use_gpu']}")
+
+                    # Verify audio file exists and is readable
+                    if not os.path.exists(audio_path):
+                        raise Exception(f"Audio file not found: {audio_path}")
+
+                    file_size = os.path.getsize(audio_path)
+                    print(f"📁 Audio file size: {file_size} bytes")
+
+                    if file_size == 0:
+                        raise Exception("Audio file is empty")
+
+                    from faster_whisper import WhisperModel
+                    import torch
 
                     # Initialize Whisper
                     device = (
@@ -116,6 +137,7 @@ class SimpleTranscriptionService:
                     )
                     compute_type = "float16" if device == "cuda" else "int8"
 
+                    print(f"🤖 Loading Whisper model {config['model']} on {device}...")
                     model = WhisperModel(
                         config["model"],
                         device=device,
@@ -125,7 +147,34 @@ class SimpleTranscriptionService:
 
                     print(f"✅ Whisper model loaded on {device}")
 
+                    # Test audio file loading first
+                    try:
+                        import librosa
+
+                        print(f"🔍 Testing audio file loading...")
+                        y, sr = librosa.load(
+                            audio_path, sr=16000, duration=5.0
+                        )  # Load first 5 seconds
+                        print(f"   Audio loaded: {len(y)} samples, {sr}Hz")
+                        print(f"   Duration: {len(y)/sr:.2f}s")
+                        print(f"   RMS: {librosa.feature.rms(y=y)[0].mean():.6f}")
+
+                        if len(y) == 0:
+                            raise Exception("Audio file contains no data")
+
+                        if librosa.feature.rms(y=y)[0].mean() < 1e-6:
+                            print(
+                                "⚠️  WARNING: Audio appears to be very quiet or silent"
+                            )
+
+                    except Exception as audio_test_error:
+                        print(f"❌ Audio loading test failed: {audio_test_error}")
+                        raise Exception(
+                            f"Audio file cannot be processed: {audio_test_error}"
+                        )
+
                     # Transcribe with word timestamps
+                    print(f"🎧 Starting Whisper transcription...")
                     segments, info = model.transcribe(
                         audio_path,
                         language=config.get("language"),
@@ -135,34 +184,122 @@ class SimpleTranscriptionService:
                         vad_parameters=dict(min_silence_duration_ms=500),
                     )
 
+                    print(
+                        f"🔍 Language detected: {info.language} (confidence: {info.language_probability})"
+                    )
+
                     # Convert to our format
                     result_segments = []
                     words = []
                     full_text = ""
+                    segment_count = 0
 
+                    print(f"📝 Processing transcription segments...")
                     for segment in segments:
+                        segment_count += 1
                         segment_words = []
                         segment_text = segment.text.strip()
-                        full_text += segment_text + " "
 
-                        if hasattr(segment, "words") and segment.words:
-                            for word in segment.words:
-                                word_dict = {
-                                    "start": word.start,
-                                    "end": word.end,
-                                    "text": word.word.strip(),
-                                    "confidence": getattr(word, "probability", None),
+                        print(
+                            f"   Segment {segment_count}: '{segment_text}' ({segment.start:.2f}-{segment.end:.2f}s)"
+                        )
+
+                        if segment_text:  # Only add non-empty segments
+                            full_text += segment_text + " "
+
+                            if hasattr(segment, "words") and segment.words:
+                                print(f"     Processing {len(segment.words)} words...")
+                                for word in segment.words:
+                                    word_text = (
+                                        word.word.strip()
+                                        if hasattr(word, "word")
+                                        else str(word).strip()
+                                    )
+                                    word_dict = {
+                                        "start": word.start,
+                                        "end": word.end,
+                                        "text": word_text,
+                                        "confidence": getattr(
+                                            word, "probability", None
+                                        ),
+                                    }
+                                    words.append(word_dict)
+                                    segment_words.append(word_dict)
+
+                            result_segments.append(
+                                {
+                                    "start": segment.start,
+                                    "end": segment.end,
+                                    "text": segment_text,
+                                    "words": segment_words,
                                 }
-                                words.append(word_dict)
-                                segment_words.append(word_dict)
+                            )
 
-                        result_segments.append(
-                            {
-                                "start": segment.start,
-                                "end": segment.end,
-                                "text": segment_text,
-                                "words": segment_words,
-                            }
+                    print(f"📊 Transcription summary:")
+                    print(f"   - Total segments processed: {segment_count}")
+                    print(f"   - Non-empty segments: {len(result_segments)}")
+                    print(f"   - Total words: {len(words)}")
+                    print(f"   - Full text length: {len(full_text)} chars")
+
+                    if len(result_segments) == 0:
+                        print("⚠️  WARNING: No segments with content found!")
+                        print("   This could indicate:")
+                        print("   - Audio file is silent or very quiet")
+                        print("   - Audio format not supported properly")
+                        print("   - VAD filter too aggressive")
+
+                        # Try without VAD filter as fallback
+                        print("🔄 Retrying without VAD filter...")
+                        segments_retry, info_retry = model.transcribe(
+                            audio_path,
+                            language=config.get("language"),
+                            initial_prompt=config.get("initial_prompt"),
+                            word_timestamps=True,
+                            vad_filter=False,  # Disable VAD
+                        )
+
+                        print("📝 Processing retry segments...")
+                        for segment in segments_retry:
+                            segment_count += 1
+                            segment_words = []
+                            segment_text = segment.text.strip()
+
+                            print(
+                                f"   Retry Segment {segment_count}: '{segment_text}' ({segment.start:.2f}-{segment.end:.2f}s)"
+                            )
+
+                            if segment_text:
+                                full_text += segment_text + " "
+
+                                if hasattr(segment, "words") and segment.words:
+                                    for word in segment.words:
+                                        word_text = (
+                                            word.word.strip()
+                                            if hasattr(word, "word")
+                                            else str(word).strip()
+                                        )
+                                        word_dict = {
+                                            "start": word.start,
+                                            "end": word.end,
+                                            "text": word_text,
+                                            "confidence": getattr(
+                                                word, "probability", None
+                                            ),
+                                        }
+                                        words.append(word_dict)
+                                        segment_words.append(word_dict)
+
+                                result_segments.append(
+                                    {
+                                        "start": segment.start,
+                                        "end": segment.end,
+                                        "text": segment_text,
+                                        "words": segment_words,
+                                    }
+                                )
+
+                        print(
+                            f"🔄 Retry results: {len(result_segments)} segments, {len(words)} words"
                         )
 
                     result = {
@@ -171,13 +308,46 @@ class SimpleTranscriptionService:
                         "text": full_text.strip(),
                         "language": info.language,
                         "language_probability": info.language_probability,
-                        "duration": sum(s["end"] - s["start"] for s in result_segments),
+                        "duration": (
+                            sum(s["end"] - s["start"] for s in result_segments)
+                            if result_segments
+                            else 0
+                        ),
                         "model": config["model"],
                     }
 
+                    print(f"✅ Transcription completed:")
+                    print(f"   - Final segments: {len(result_segments)}")
+                    print(f"   - Final words: {len(words)}")
                     print(
-                        f"✅ Transcription completed: {len(words)} words, {len(result_segments)} segments"
+                        f"   - Final text: '{full_text.strip()[:100]}{'...' if len(full_text) > 100 else ''}'"
                     )
+
+                    if len(words) == 0:
+                        print(
+                            "❌ ERROR: No words transcribed! This indicates a serious problem."
+                        )
+                        print("   Possible causes:")
+                        print("   - Audio file is corrupted or unreadable")
+                        print("   - Audio has no speech content")
+                        print("   - Whisper model failed to load properly")
+                        print("   - File format incompatible")
+
+                        # Add some basic audio info
+                        try:
+                            import librosa
+
+                            y, sr = librosa.load(audio_path, sr=None)
+                            duration = len(y) / sr
+                            print(
+                                f"   Audio file info: {duration:.2f}s, {sr}Hz, {len(y)} samples"
+                            )
+                            print(
+                                f"   RMS energy: {librosa.feature.rms(y=y)[0].mean():.6f}"
+                            )
+                        except Exception as audio_error:
+                            print(f"   Could not analyze audio: {audio_error}")
+
                     return result
 
                 except Exception as e:
