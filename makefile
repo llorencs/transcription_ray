@@ -12,13 +12,13 @@ help:
 	@echo "  status       - Show service status"
 	@echo "  test         - Run API tests (requires TEST_AUDIO_FILE)"
 	@echo "  test-ray     - Run Ray-based transcription test"
-	@echo "  verify-deps  - Verify ML dependencies in API container"
+	@echo "  verify-ray   - Verify ML dependencies in Ray container"
 	@echo "  test-container - Run tests inside API container"
 
-# Verify ML dependencies
-verify-deps:
-	@echo "🔍 Verifying ML dependencies in API container..."
-	@docker compose exec api python /app/scripts/verify_ml_deps.py
+# Verify Ray dependencies
+verify-ray:
+	@echo "🔍 Verifying ML dependencies in Ray container..."
+	@docker compose exec ray-head python /app/scripts/verify_ray_deps.py
 
 # Test inside container
 test-container:

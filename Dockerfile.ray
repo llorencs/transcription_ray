@@ -28,7 +28,7 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Copy requirements and install Python packages
+# Copy requirements and install Python packages (ML dependencies for Ray workers)
 COPY requirements.ray.txt .
 RUN pip install --no-cache-dir -r requirements.ray.txt
 

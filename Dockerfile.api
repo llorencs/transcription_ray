@@ -16,7 +16,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Copy API requirements (without heavy ML dependencies)
+# Copy API requirements (lightweight for API)
 COPY requirements.api.txt ./
 RUN pip install --no-cache-dir -r requirements.api.txt
 
