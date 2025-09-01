@@ -24,9 +24,7 @@ from src.models.files import FileResponse, FilesResponse
 from src.models.pydantic_models import ASRModel, JSONModel
 from src.database.mongodb import MongoDB
 from src.services.file_service import FileService
-from src.services.transcription_service_simple import (
-    SimpleTranscriptionService,
-)  # FIXED: Use SimpleTranscriptionService
+from src.services.transcription_service_ray_exec import RayExecTranscriptionService
 from src.utils.ray_client import RayClient
 
 # Create FastAPI app
@@ -70,10 +68,10 @@ async def startup_event():
     ray_client = RayClient()
     await ray_client.connect()
 
-    # Use Simple Ray Tasks approach (more reliable)
-    transcription_service = SimpleTranscriptionService(db, ray_client)
+    # Use Ray Container Execution approach (dependencies available in Ray container)
+    transcription_service = RayExecTranscriptionService(db, ray_client)
 
-    print("✅ API service initialized with Simple Transcription Service")
+    print("✅ API service initialized with Ray Exec Transcription Service")
 
 
 @app.on_event("shutdown")

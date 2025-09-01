@@ -11,7 +11,6 @@ import ray
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
-import traceback
 
 from src.models.videotools_model import (
     TranscriptionReqModel,
@@ -39,23 +38,6 @@ class SimpleTranscriptionService:
     def __init__(self, db: MongoDB, ray_client: RayClient):
         self.db = db
         self.ray_client = ray_client
-        self._ensure_ray_initialized()
-
-    def _ensure_ray_initialized(self):
-        """Ensure Ray is initialized."""
-        if not ray.is_initialized():
-            try:
-                ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
-                print("✅ Ray initialized in SimpleTranscriptionService")
-            except Exception as e:
-                print(f"⚠️ Failed to connect to Ray cluster: {e}")
-                print("⚠️ Initializing Ray locally as fallback")
-                try:
-                    ray.init(ignore_reinit_error=True)
-                    print("✅ Ray initialized locally")
-                except Exception as local_e:
-                    print(f"❌ Failed to initialize Ray locally: {local_e}")
-                    raise
 
     async def start_transcription(self, request: TranscriptionReqModel) -> str:
         """Start a new transcription task using Ray tasks."""
@@ -89,7 +71,6 @@ class SimpleTranscriptionService:
         self, task_id: str, request: TranscriptionReqModel
     ):
         """Process transcription using Ray tasks (simpler than Jobs)."""
-        temp_path = None
         try:
             # Update status to processing
             await self.db.update_task(task_id, {"status": "processing"})
@@ -104,10 +85,9 @@ class SimpleTranscriptionService:
 
             # Create temp file for processing
             temp_dir = Path("/app/temp")
-            temp_dir.mkdir(exist_ok=True, parents=True)
+            temp_dir.mkdir(exist_ok=True)
             temp_path = temp_dir / f"{task_id}_{filename}"
 
-            print(f"📝 Writing temp file: {temp_path}")
             with open(temp_path, "wb") as f:
                 f.write(file_data)
 
@@ -123,23 +103,14 @@ class SimpleTranscriptionService:
 
             print(f"🚀 Starting Ray task for transcription: {task_id}")
 
-            # Ensure Ray is initialized before creating the remote function
-            self._ensure_ray_initialized()
-
             # Create Ray task for transcription
-            @ray.remote(
-                num_gpus=1 if request.gpu else 0,
-                num_cpus=2,
-                memory=4_000_000_000,
-                max_retries=1,
-            )
+            @ray.remote(num_gpus=1 if request.gpu else 0, num_cpus=2, memory=4000000000)
             def transcription_task(audio_path: str, config: dict):
                 try:
                     import sys
                     import os
 
-                    sys.path.insert(0, "/app/src")
-                    sys.path.insert(0, "/app")
+                    sys.path.append("/app/src")
 
                     print(f"🎯 Processing audio: {audio_path}")
                     print(f"🤖 Model: {config['model']}")
@@ -155,38 +126,8 @@ class SimpleTranscriptionService:
                     if file_size == 0:
                         raise Exception("Audio file is empty")
 
-                    # Import models after verifying file
                     from faster_whisper import WhisperModel
                     import torch
-                    import librosa
-                    import numpy as np  # FIXED: Added numpy import here
-
-                    # Test audio file loading first
-                    try:
-                        print(f"🔍 Testing audio file loading...")
-                        y, sr = librosa.load(audio_path, sr=16000, duration=5.0)
-                        print(f"   Audio loaded: {len(y)} samples, {sr}Hz")
-
-                        if len(y) == 0:
-                            raise Exception("Audio file contains no data")
-
-                        duration_test = len(y) / sr
-                        print(f"   Test duration: {duration_test:.2f}s")
-
-                        # Calculate RMS using numpy
-                        rms = np.sqrt(np.mean(y**2))
-                        print(f"   RMS: {rms:.6f}")
-
-                        if rms < 1e-6:
-                            print(
-                                "⚠️  WARNING: Audio appears to be very quiet or silent"
-                            )
-
-                    except Exception as audio_test_error:
-                        print(f"❌ Audio loading test failed: {audio_test_error}")
-                        raise Exception(
-                            f"Audio file cannot be processed: {audio_test_error}"
-                        )
 
                     # Initialize Whisper
                     device = (
@@ -205,6 +146,32 @@ class SimpleTranscriptionService:
                     )
 
                     print(f"✅ Whisper model loaded on {device}")
+
+                    # Test audio file loading first
+                    try:
+                        import librosa
+
+                        print(f"🔍 Testing audio file loading...")
+                        y, sr = librosa.load(
+                            audio_path, sr=16000, duration=5.0
+                        )  # Load first 5 seconds
+                        print(f"   Audio loaded: {len(y)} samples, {sr}Hz")
+                        print(f"   Duration: {len(y)/sr:.2f}s")
+                        print(f"   RMS: {librosa.feature.rms(y=y)[0].mean():.6f}")
+
+                        if len(y) == 0:
+                            raise Exception("Audio file contains no data")
+
+                        if librosa.feature.rms(y=y)[0].mean() < 1e-6:
+                            print(
+                                "⚠️  WARNING: Audio appears to be very quiet or silent"
+                            )
+
+                    except Exception as audio_test_error:
+                        print(f"❌ Audio loading test failed: {audio_test_error}")
+                        raise Exception(
+                            f"Audio file cannot be processed: {audio_test_error}"
+                        )
 
                     # Transcribe with word timestamps
                     print(f"🎧 Starting Whisper transcription...")
@@ -233,15 +200,15 @@ class SimpleTranscriptionService:
                         segment_words = []
                         segment_text = segment.text.strip()
 
-                        if segment_count <= 5:  # Only print first 5 segments
-                            print(
-                                f"   Segment {segment_count}: '{segment_text[:50]}...' ({segment.start:.2f}-{segment.end:.2f}s)"
-                            )
+                        print(
+                            f"   Segment {segment_count}: '{segment_text}' ({segment.start:.2f}-{segment.end:.2f}s)"
+                        )
 
                         if segment_text:  # Only add non-empty segments
                             full_text += segment_text + " "
 
                             if hasattr(segment, "words") and segment.words:
+                                print(f"     Processing {len(segment.words)} words...")
                                 for word in segment.words:
                                     word_text = (
                                         word.word.strip()
@@ -249,8 +216,8 @@ class SimpleTranscriptionService:
                                         else str(word).strip()
                                     )
                                     word_dict = {
-                                        "start": float(word.start),
-                                        "end": float(word.end),
+                                        "start": word.start,
+                                        "end": word.end,
                                         "text": word_text,
                                         "confidence": getattr(
                                             word, "probability", None
@@ -261,8 +228,8 @@ class SimpleTranscriptionService:
 
                             result_segments.append(
                                 {
-                                    "start": float(segment.start),
-                                    "end": float(segment.end),
+                                    "start": segment.start,
+                                    "end": segment.end,
                                     "text": segment_text,
                                     "words": segment_words,
                                 }
@@ -276,21 +243,30 @@ class SimpleTranscriptionService:
 
                     if len(result_segments) == 0:
                         print("⚠️  WARNING: No segments with content found!")
-                        print("🔄 Retrying without VAD filter...")
+                        print("   This could indicate:")
+                        print("   - Audio file is silent or very quiet")
+                        print("   - Audio format not supported properly")
+                        print("   - VAD filter too aggressive")
 
                         # Try without VAD filter as fallback
+                        print("🔄 Retrying without VAD filter...")
                         segments_retry, info_retry = model.transcribe(
                             audio_path,
                             language=config.get("language"),
                             initial_prompt=config.get("initial_prompt"),
                             word_timestamps=True,
-                            vad_filter=False,
+                            vad_filter=False,  # Disable VAD
                         )
 
+                        print("📝 Processing retry segments...")
                         for segment in segments_retry:
                             segment_count += 1
                             segment_words = []
                             segment_text = segment.text.strip()
+
+                            print(
+                                f"   Retry Segment {segment_count}: '{segment_text}' ({segment.start:.2f}-{segment.end:.2f}s)"
+                            )
 
                             if segment_text:
                                 full_text += segment_text + " "
@@ -303,8 +279,8 @@ class SimpleTranscriptionService:
                                             else str(word).strip()
                                         )
                                         word_dict = {
-                                            "start": float(word.start),
-                                            "end": float(word.end),
+                                            "start": word.start,
+                                            "end": word.end,
                                             "text": word_text,
                                             "confidence": getattr(
                                                 word, "probability", None
@@ -315,8 +291,8 @@ class SimpleTranscriptionService:
 
                                 result_segments.append(
                                     {
-                                        "start": float(segment.start),
-                                        "end": float(segment.end),
+                                        "start": segment.start,
+                                        "end": segment.end,
                                         "text": segment_text,
                                         "words": segment_words,
                                     }
@@ -331,11 +307,7 @@ class SimpleTranscriptionService:
                         "words": words,
                         "text": full_text.strip(),
                         "language": info.language,
-                        "language_probability": (
-                            float(info.language_probability)
-                            if info.language_probability
-                            else 0.0
-                        ),
+                        "language_probability": info.language_probability,
                         "duration": (
                             sum(s["end"] - s["start"] for s in result_segments)
                             if result_segments
@@ -344,11 +316,13 @@ class SimpleTranscriptionService:
                         "model": config["model"],
                     }
 
-                    print(f"✅ Transcription completed successfully")
+                    print(f"✅ Transcription completed:")
                     print(f"   - Final segments: {len(result_segments)}")
                     print(f"   - Final words: {len(words)}")
+                    print(
+                        f"   - Final text: '{full_text.strip()[:100]}{'...' if len(full_text) > 100 else ''}'"
+                    )
 
-                    # Add some debug info if no content was transcribed
                     if len(words) == 0:
                         print(
                             "❌ ERROR: No words transcribed! This indicates a serious problem."
@@ -361,13 +335,16 @@ class SimpleTranscriptionService:
 
                         # Add some basic audio info
                         try:
-                            y_full, sr_full = librosa.load(audio_path, sr=None)
-                            duration = len(y_full) / sr_full
-                            rms_full = np.sqrt(np.mean(y_full**2))
+                            import librosa
+
+                            y, sr = librosa.load(audio_path, sr=None)
+                            duration = len(y) / sr
                             print(
-                                f"   Audio file info: {duration:.2f}s, {sr_full}Hz, {len(y_full)} samples"
+                                f"   Audio file info: {duration:.2f}s, {sr}Hz, {len(y)} samples"
                             )
-                            print(f"   RMS energy: {rms_full:.6f}")
+                            print(
+                                f"   RMS energy: {librosa.feature.rms(y=y)[0].mean():.6f}"
+                            )
                         except Exception as audio_error:
                             print(f"   Could not analyze audio: {audio_error}")
 
@@ -379,6 +356,30 @@ class SimpleTranscriptionService:
 
                     traceback.print_exc()
                     raise
+
+            # Ensure Ray is initialized with proper runtime environment
+            if not ray.is_initialized():
+                try:
+                    # Initialize Ray with runtime environment that includes all dependencies
+                    ray.init(
+                        address="ray://ray-head:10001",
+                        ignore_reinit_error=True,
+                        runtime_env={
+                            "pip": [
+                                "faster-whisper==1.1.0",
+                                "numpy==2.1.3",
+                                "librosa==0.10.2",
+                                "soundfile==0.12.1",
+                                "torch==2.5.1",
+                            ]
+                        },
+                    )
+                    print("✅ Ray initialized with runtime environment")
+                except Exception as e:
+                    print(f"❌ Ray initialization failed: {e}")
+                    # Try local initialization as fallback
+                    ray.init(ignore_reinit_error=True)
+                    print("✅ Ray initialized locally")
 
             # Submit Ray task
             task_config = {
@@ -425,6 +426,8 @@ class SimpleTranscriptionService:
         except Exception as e:
             error_msg = str(e)
             print(f"❌ Transcription processing failed for task {task_id}: {error_msg}")
+            import traceback
+
             traceback.print_exc()
 
             await self.db.update_task(
@@ -452,80 +455,49 @@ class SimpleTranscriptionService:
         from src.utils.subtitle_formats import SubtitleFormatter
 
         try:
-            # Convert to our models with proper error handling
-            words = []
-            for word in ray_result.get("words", []):
-                try:
-                    words.append(
+            # Convert to our models
+            words = [
+                WordModel(
+                    start=word["start"],
+                    end=word["end"],
+                    text=word["text"],
+                    confidence=word.get("confidence"),
+                    speaker=word.get("speaker"),
+                )
+                for word in ray_result.get("words", [])
+            ]
+
+            segments = [
+                SegmentModel(
+                    start=segment["start"],
+                    end=segment["end"],
+                    text=segment["text"],
+                    words=[
                         WordModel(
-                            start=float(word["start"]),
-                            end=float(word["end"]),
-                            text=str(word["text"]),
-                            confidence=(
-                                float(word["confidence"])
-                                if word.get("confidence") is not None
-                                else None
-                            ),
-                            speaker=(
-                                str(word["speaker"]) if word.get("speaker") else None
-                            ),
+                            start=word["start"],
+                            end=word["end"],
+                            text=word["text"],
+                            confidence=word.get("confidence"),
+                            speaker=word.get("speaker"),
                         )
-                    )
-                except Exception as e:
-                    print(f"⚠️ Error processing word: {e}, word data: {word}")
-                    continue
-
-            segments = []
-            for segment in ray_result.get("segments", []):
-                try:
-                    segment_words = []
-                    for word in segment.get("words", []):
-                        try:
-                            segment_words.append(
-                                WordModel(
-                                    start=float(word["start"]),
-                                    end=float(word["end"]),
-                                    text=str(word["text"]),
-                                    confidence=(
-                                        float(word["confidence"])
-                                        if word.get("confidence") is not None
-                                        else None
-                                    ),
-                                    speaker=(
-                                        str(word["speaker"])
-                                        if word.get("speaker")
-                                        else None
-                                    ),
-                                )
-                            )
-                        except Exception as e:
-                            print(f"⚠️ Error processing segment word: {e}")
-                            continue
-
-                    segments.append(
-                        SegmentModel(
-                            start=float(segment["start"]),
-                            end=float(segment["end"]),
-                            text=str(segment["text"]),
-                            words=segment_words,
-                        )
-                    )
-                except Exception as e:
-                    print(f"⚠️ Error processing segment: {e}, segment data: {segment}")
-                    continue
+                        for word in segment.get("words", [])
+                    ],
+                )
+                for segment in ray_result.get("segments", [])
+            ]
 
             json_result = JSONModel(
-                text=str(ray_result.get("text", "")),
+                text=ray_result.get("text", ""),
                 segments=segments,
-                language=str(ray_result.get("language", "en")),
-                language_probability=float(ray_result.get("language_probability", 0.0)),
+                language=ray_result.get("language"),
+                language_probability=ray_result.get("language_probability"),
             )
 
             # Generate subtitle formats
             subtitle_formatter = SubtitleFormatter()
-            srt_content = subtitle_formatter.to_srt(segments) if segments else ""
-            vtt_content = subtitle_formatter.to_vtt(segments) if segments else ""
-            txt_content = str(ray_result.get("text", ""))
+            srt_content = subtitle_formatter.to_srt(segments)
+            vtt_content = subtitle_formatter.to_vtt(segments)
+            txt_content = ray_result.get("text", "")
 
             # Create ASR result if requested
             asr_result = None
@@ -543,11 +515,9 @@ class SimpleTranscriptionService:
             }
 
             await self.db.store_result(task_id, result_data)
-            print(f"✅ Results stored for task {task_id}")
 
         except Exception as e:
             print(f"❌ Error storing results for task {task_id}: {e}")
-            traceback.print_exc()
             raise
 
     def _create_asr_result(self, ray_result: dict, model: str) -> ASRModel:
@@ -557,26 +527,18 @@ class SimpleTranscriptionService:
             events = []
 
             for word in ray_result.get("words", []):
-                try:
-                    event = EventModel(
-                        content=str(word["text"]),
-                        start_time=float(word["start"]),
-                        end_time=float(word["end"]),
-                        event_type="word",
-                        language=str(ray_result.get("language", "en")),
-                        confidence=(
-                            float(word["confidence"])
-                            if word.get("confidence") is not None
-                            else None
-                        ),
-                        speaker=str(word["speaker"]) if word.get("speaker") else None,
-                        is_eol=False,
-                        is_eos=False,
-                    )
-                    events.append(event)
-                except Exception as e:
-                    print(f"⚠️ Error creating event from word: {e}")
-                    continue
+                event = EventModel(
+                    content=word["text"],
+                    start_time=word["start"],
+                    end_time=word["end"],
+                    event_type="word",
+                    language=ray_result.get("language"),
+                    confidence=word.get("confidence"),
+                    speaker=word.get("speaker"),
+                    is_eol=False,
+                    is_eos=False,
+                )
+                events.append(event)
 
             return ASRModel(
                 asr_model=model,
@@ -584,9 +546,9 @@ class SimpleTranscriptionService:
                 generated_by="advanced-transcription-service",
                 version=1,
                 events=events,
-                language=str(ray_result.get("language", "en")),
-                language_probability=float(ray_result.get("language_probability", 0.0)),
-                duration=float(ray_result.get("duration", 0.0)),
+                language=ray_result.get("language"),
+                language_probability=ray_result.get("language_probability"),
+                duration=ray_result.get("duration"),
                 processing_info={
                     "model": model,
                     "segments_count": len(ray_result.get("segments", [])),
@@ -596,7 +558,6 @@ class SimpleTranscriptionService:
 
         except Exception as e:
             print(f"Error creating ASR result: {e}")
-            traceback.print_exc()
             # Return empty ASR result as fallback
             return ASRModel(
                 asr_model=model,
@@ -604,13 +565,12 @@ class SimpleTranscriptionService:
                 generated_by="advanced-transcription-service",
                 version=1,
                 events=[],
-                language="en",
-                language_probability=0.0,
+                language=ray_result.get("language", "en"),
+                language_probability=ray_result.get("language_probability", 0.5),
             )
 
     async def detect_language(self, file_id: str) -> languageDetectionModel:
         """Detect language using simple Ray task."""
-        temp_path = None
         try:
             # Get file
             file_data, filename = await self.db.get_file(file_id)
@@ -619,23 +579,15 @@ class SimpleTranscriptionService:
 
             # Create temp file
             temp_dir = Path("/app/temp")
-            temp_dir.mkdir(exist_ok=True, parents=True)
+            temp_dir.mkdir(exist_ok=True)
             temp_path = temp_dir / f"lang_{file_id}_{filename}"
 
             with open(temp_path, "wb") as f:
                 f.write(file_data)
 
-            # Ensure Ray is initialized
-            self._ensure_ray_initialized()
-
-            @ray.remote(num_cpus=1, memory=2_000_000_000, max_retries=1)
+            @ray.remote(num_cpus=1, memory=2000000000)
             def language_detection_task(audio_path: str):
                 try:
-                    import sys
-
-                    sys.path.insert(0, "/app/src")
-                    sys.path.insert(0, "/app")
-
                     from faster_whisper import WhisperModel
 
                     # Use CPU to avoid GPU conflicts
@@ -659,20 +611,29 @@ class SimpleTranscriptionService:
 
                     return {
                         "language": info.language,
-                        "confidence": (
-                            float(info.language_probability)
-                            if info.language_probability
-                            else 0.5
-                        ),
+                        "confidence": info.language_probability,
                     }
 
                 except Exception as e:
                     print(f"Language detection failed: {e}")
                     return {"language": "en", "confidence": 0.5}
 
+            # Ensure Ray is initialized
+            if not ray.is_initialized():
+                try:
+                    ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                except:
+                    ray.init(ignore_reinit_error=True)
+
             # Submit and get result
             future = language_detection_task.remote(str(temp_path))
-            result = ray.get(future, timeout=60)  # 1 minute timeout
+            result = ray.get(future)
+
+            # Cleanup temp file
+            try:
+                temp_path.unlink(missing_ok=True)
+            except:
+                pass
 
             return languageDetectionModel(
                 file_id=file_id,
@@ -685,15 +646,8 @@ class SimpleTranscriptionService:
             return languageDetectionModel(
                 file_id=file_id, language="en", confidence=0.5
             )
-        finally:
-            # Cleanup temp file
-            if temp_path and temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except:
-                    pass
 
-    # Task management methods
+    # Task management methods (same as before)
     async def get_task(self, task_id: str) -> Optional[TaskRespModel]:
         """Get task by ID."""
         task = await self.db.get_task(task_id)
@@ -728,17 +682,13 @@ class SimpleTranscriptionService:
         )
         return success
 
-    # Result retrieval methods
+    # Result methods (same as hybrid version)
     async def get_json_result(self, task_id: str) -> Optional[JSONModel]:
         """Get JSON result for task."""
-        try:
-            result = await self.db.get_result(task_id)
-            if not result or "json_result" not in result.get("result_data", {}):
-                return None
-            return JSONModel(**result["result_data"]["json_result"])
-        except Exception as e:
-            print(f"Error getting JSON result: {e}")
+        result = await self.db.get_result(task_id)
+        if not result or "json_result" not in result["result_data"]:
             return None
+        return JSONModel(**result["result_data"]["json_result"])
 
     async def get_asr_result(self, task_id: str) -> Optional[ASRModel]:
         """Get ASR result for task."""
@@ -747,12 +697,10 @@ class SimpleTranscriptionService:
             if not result:
                 return None
 
-            result_data = result.get("result_data", {})
-            asr_data = result_data.get("asr_result")
-
+            asr_data = result["result_data"].get("asr_result")
             if not asr_data:
                 # Generate ASR result on the fly if not available
-                ray_result = result_data.get("ray_result", {})
+                ray_result = result["result_data"].get("ray_result", {})
                 if ray_result:
                     asr_result = self._create_asr_result(ray_result, "base")
                     return asr_result
@@ -761,7 +709,6 @@ class SimpleTranscriptionService:
             return ASRModel(**asr_data)
         except Exception as e:
             print(f"Error getting ASR result: {e}")
-            traceback.print_exc()
             return None
 
     async def get_srt_result(self, task_id: str) -> Optional[str]:
@@ -771,12 +718,10 @@ class SimpleTranscriptionService:
             if not result:
                 return None
 
-            result_data = result.get("result_data", {})
-            srt_content = result_data.get("srt_content")
-
+            srt_content = result["result_data"].get("srt_content")
             if not srt_content:
                 # Generate SRT on the fly if not available
-                json_result = result_data.get("json_result")
+                json_result = result["result_data"].get("json_result")
                 if json_result:
                     from src.utils.subtitle_formats import SubtitleFormatter
 
@@ -789,7 +734,6 @@ class SimpleTranscriptionService:
             return srt_content
         except Exception as e:
             print(f"Error getting SRT result: {e}")
-            traceback.print_exc()
             return None
 
     async def get_vtt_result(self, task_id: str) -> Optional[str]:
@@ -799,12 +743,10 @@ class SimpleTranscriptionService:
             if not result:
                 return None
 
-            result_data = result.get("result_data", {})
-            vtt_content = result_data.get("vtt_content")
-
+            vtt_content = result["result_data"].get("vtt_content")
             if not vtt_content:
                 # Generate VTT on the fly if not available
-                json_result = result_data.get("json_result")
+                json_result = result["result_data"].get("json_result")
                 if json_result:
                     from src.utils.subtitle_formats import SubtitleFormatter
 
@@ -817,7 +759,6 @@ class SimpleTranscriptionService:
             return vtt_content
         except Exception as e:
             print(f"Error getting VTT result: {e}")
-            traceback.print_exc()
             return None
 
     async def get_txt_result(self, task_id: str) -> Optional[str]:
@@ -827,26 +768,25 @@ class SimpleTranscriptionService:
             if not result:
                 return None
 
-            result_data = result.get("result_data", {})
-            txt_content = result_data.get("txt_content")
-
+            txt_content = result["result_data"].get("txt_content")
             if not txt_content:
-                # Try to get from json_result or ray_result
-                json_result = result_data.get("json_result")
+                # Generate TXT on the fly if not available
+                json_result = result["result_data"].get("json_result")
                 if json_result:
-                    txt_content = json_result.get("text", "")
-                else:
-                    ray_result = result_data.get("ray_result")
-                    if ray_result:
-                        txt_content = ray_result.get("text", "")
+                    return json_result.get("text", "")
 
-            return txt_content or ""
+                ray_result = result["result_data"].get("ray_result")
+                if ray_result:
+                    return ray_result.get("text", "")
 
+                return ""
+
+            return txt_content
         except Exception as e:
             print(f"Error getting TXT result: {e}")
-            traceback.print_exc()
             return None
 
+    # URL transcription (simplified)
     async def start_transcription_from_url(
         self, request: TranscriptionURLReqModel
     ) -> str:
