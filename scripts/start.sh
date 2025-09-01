@@ -4,7 +4,7 @@
 
 set -e
 
-echo "🚀 Starting Advanced Transcription Service..."
+echo "🚀 Starting Advanced Transcription Service with Direct Processing..."
 
 # Check if Docker is installed
 if ! command -v docker &> /dev/null; then
@@ -70,7 +70,6 @@ if [ -n "$GPU_SUPPORT" ]; then
     $DOCKER_COMPOSE up -d
 else
     echo "💻 Starting in CPU-only mode..."
-    # Remove GPU-specific configuration for CPU-only deployment
     $DOCKER_COMPOSE -f docker-compose.yml up -d
 fi
 
@@ -105,37 +104,37 @@ for i in {1..30}; do
     sleep 2
 done
 
-# Wait for Ray
-echo "⚡ Waiting for Ray cluster..."
-for i in {1..60}; do
+# Wait for Ray cluster (optional - may not be needed for direct processing)
+echo "⚡ Checking Ray cluster (optional)..."
+for i in {1..30}; do
     if curl -s http://localhost:8265/api/cluster_status > /dev/null 2>&1; then
         echo "✅ Ray cluster is ready"
+        RAY_AVAILABLE=true
         break
     fi
-    if [ $i -eq 60 ]; then
-        echo "❌ Ray cluster failed to start"
-        exit 1
+    if [ $i -eq 30 ]; then
+        echo "⚠️ Ray cluster not available (using direct processing mode)"
+        RAY_AVAILABLE=false
+        break
     fi
-    sleep 5
+    sleep 3
 done
 
-# Wait for API
+# Wait for API service
 echo "🌐 Waiting for API service..."
-for i in {1..30}; do
+for i in {1..60}; do
     if curl -s http://localhost:8080/health > /dev/null 2>&1; then
         echo "✅ API service is ready"
         break
     fi
-    if [ $i -eq 30 ]; then
+    if [ $i -eq 60 ]; then
         echo "❌ API service failed to start"
+        echo "📋 Checking API logs:"
+        $DOCKER_COMPOSE logs api
         exit 1
     fi
     sleep 5
 done
-
-# Deploy Ray Serve models
-echo "🤖 Deploying ML models..."
-$DOCKER_COMPOSE exec -T ray-head python src/deployments/ray_serve_models.py || echo "⚠️ Model deployment may take a few minutes on first run"
 
 echo ""
 echo "🎉 Advanced Transcription Service is now running!"
@@ -143,10 +142,17 @@ echo ""
 echo "📊 Service URLs:"
 echo "  • API Documentation: http://localhost:8080/docs"
 echo "  • API Health Check: http://localhost:8080/health"
-echo "  • Ray Dashboard: http://localhost:8265"
+if [ "$RAY_AVAILABLE" = true ]; then
+    echo "  • Ray Dashboard: http://localhost:8265"
+fi
+echo ""
+echo "🏗️ Architecture:"
+echo "  • Direct Processing: API container includes ML libraries"
+echo "  • No Ray dependency for transcription"
+echo "  • GPU acceleration available if NVIDIA GPU detected"
 echo ""
 echo "🧪 Test the service:"
-echo "  python scripts/test_api.py --audio-file /path/to/audio.wav"
+echo "  make test-direct TEST_AUDIO_FILE=/path/to/audio.wav"
 echo ""
 echo "📝 View logs:"
 echo "  $DOCKER_COMPOSE logs -f"
@@ -158,3 +164,40 @@ echo ""
 # Show service status
 echo "📋 Current service status:"
 $DOCKER_COMPOSE ps
+
+echo ""
+echo "🔍 Quick health checks:"
+
+# Check API
+API_HEALTH=$(curl -s http://localhost:8080/health 2>/dev/null || echo "failed")
+if echo "$API_HEALTH" | grep -q "healthy"; then
+    echo "  ✅ API Service: Healthy"
+else
+    echo "  ❌ API Service: Not responding"
+fi
+
+# Check MongoDB
+if $DOCKER_COMPOSE exec -T mongodb mongosh --quiet --eval "db.runCommand('ping')" > /dev/null 2>&1; then
+    echo "  ✅ MongoDB: Connected"
+else
+    echo "  ❌ MongoDB: Connection failed"
+fi
+
+# Check Redis
+if $DOCKER_COMPOSE exec -T redis redis-cli ping > /dev/null 2>&1; then
+    echo "  ✅ Redis: Connected"
+else
+    echo "  ❌ Redis: Connection failed"
+fi
+
+# Check Ray (optional)
+if [ "$RAY_AVAILABLE" = true ]; then
+    echo "  ✅ Ray Cluster: Available (optional)"
+else
+    echo "  ⚠️ Ray Cluster: Not available (using direct processing)"
+fi
+
+echo ""
+echo "🎯 Ready for transcription!"
+echo "   The service now uses direct processing in the API container"
+echo "   which includes all necessary ML dependencies."

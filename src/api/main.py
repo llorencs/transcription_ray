@@ -24,7 +24,7 @@ from src.models.files import FileResponse, FilesResponse
 from src.models.pydantic_models import ASRModel, JSONModel
 from src.database.mongodb import MongoDB
 from src.services.file_service import FileService
-from src.services.transcription_service_ray_exec import RayExecTranscriptionService
+from src.services.transcription_service_direct import DirectTranscriptionService
 from src.utils.ray_client import RayClient
 
 # Create FastAPI app
@@ -68,10 +68,10 @@ async def startup_event():
     ray_client = RayClient()
     await ray_client.connect()
 
-    # Use Ray Container Execution approach (dependencies available in Ray container)
-    transcription_service = RayExecTranscriptionService(db, ray_client)
+    # Use Direct Transcription Service (no Docker dependency)
+    transcription_service = DirectTranscriptionService(db, ray_client)
 
-    print("✅ API service initialized with Ray Exec Transcription Service")
+    print("✅ API service initialized with Direct Transcription Service")
 
 
 @app.on_event("shutdown")
@@ -180,7 +180,7 @@ async def transcribe_audio(request: TranscriptionReqModel):
             **request.dict(),
             id=task_id,
             status="pending",
-            message="Transcription task started using Simple Ray Tasks",
+            message="Transcription task started using Direct Processing",
         )
     except Exception as e:
         raise HTTPException(

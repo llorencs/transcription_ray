@@ -11,10 +11,32 @@ help:
 	@echo "  logs         - Show service logs"
 	@echo "  status       - Show service status"
 	@echo "  test         - Run API tests (requires TEST_AUDIO_FILE)"
+	@echo "  test-direct  - Run direct transcription test (no Ray dependency)"
+	@echo "  verify-deps  - Verify ML dependencies in API container"
+	@echo "  test-container - Run tests inside API container"
+
+# Verify ML dependencies
+verify-deps:
+	@echo "🔍 Verifying ML dependencies in API container..."
+	@docker compose exec api python /app/scripts/verify_ml_deps.py
+
+# Test inside container
+test-container:
+	@echo "🧪 Running tests inside API container..."
+	@docker compose exec api bash /app/scripts/test_inside_container.sh
+
+# Quick test with sample file
+quick-test:
+	@echo "🚀 Quick test with direct transcription..."
+	@echo "This test uses the direct transcription service (no Ray dependency)"
+	@if [ ! -f "test_sample.wav" ]; then \
+		echo "📝 Creating a test audio file..."; \
+		echo "Note: You should replace this with a real audio file"; \
+		touch test_sample.wav; \
+	fi
+	@make test-direct TEST_AUDIO_FILE=test_sample.wav
 	@echo "  clean        - Clean up containers and volumes"
 	@echo "  build        - Build Docker images"
-	@echo "  deploy       - Deploy Ray Serve models (Python-only)"
-	@echo "  deploy-job   - Deploy using Ray Job submission"
 	@echo "  health       - Check service health"
 
 # Start services
@@ -49,44 +71,34 @@ test:
 	@echo "🧪 Running API tests..."
 	@python3 scripts/test_api.py --audio-file "$(TEST_AUDIO_FILE)"
 
+# Run direct transcription test (no Ray dependency)
+test-direct:
+	@if [ -z "$(TEST_AUDIO_FILE)" ]; then \
+		echo "❌ Please set TEST_AUDIO_FILE environment variable"; \
+		echo "Example: make test-direct TEST_AUDIO_FILE=/path/to/audio.wav"; \
+		exit 1; \
+	fi
+	@echo "🧪 Running direct transcription test..."
+	@python3 scripts/test_direct.py "$(TEST_AUDIO_FILE)"
+
 # Clean up everything
 clean:
 	@echo "🧹 Cleaning up..."
 	@docker compose down -v --remove-orphans
 	@docker system prune -f
-	@sudo rm -rf temp/* logs/*
+	@sudo rm -rf temp/* logs/* test_result_*.srt test_result_*.txt
 
 # Build images
 build:
 	@echo "🏗️ Building Docker images..."
 	@docker compose build --parallel
 
-# Deploy models (Hybrid: Ray Jobs + Actors)
-deploy:
-	@echo "🚀 Preparing hybrid transcription service..."
-	@docker compose exec ray-head python /app/scripts/deploy_hybrid.py
-
-# Deploy using direct Python (legacy)
-deploy-direct:
-	@echo "🤖 Deploying Ray Serve models (direct Python)..."
-	@docker compose exec ray-head python /app/scripts/deploy_python_only.py
-
-# Deploy using Ray Job submission (alternative)
-deploy-job:
-	@echo "🚀 Deploying using Ray Job submission..."
-	@docker compose exec ray-head /app/scripts/job_management.sh submit
-
-# Alternative: deploy from YAML (if needed)
-deploy-yaml:
-	@echo "🤖 Deploying Ray Serve models from YAML..."
-	@docker compose exec ray-head serve deploy /app/config/serve_config.yaml
-
 # Health check
 health:
 	@echo "🔍 Checking service health..."
 	@curl -s http://localhost:8080/health | jq '.' || echo "❌ API service not responding"
-	@curl -s http://localhost:8000/health | jq '.' || echo "❌ Ray Serve not responding"
-	@curl -s http://localhost:8265/api/cluster_status | jq '.cluster_status' || echo "❌ Ray cluster not responding"
+	@curl -s http://localhost:8000/health | jq '.' || echo "❌ Ray Serve not responding (optional)"
+	@curl -s http://localhost:8265/api/cluster_status | jq '.cluster_status' || echo "❌ Ray cluster not responding (optional)"
 
 # Development targets
 dev-start:
@@ -131,27 +143,6 @@ monitor:
 		xdg-open http://localhost:8265; \
 	fi
 
-# Ray-specific operations
-ray-status:
-	@echo "📊 Ray Cluster Status:"
-	@docker compose exec ray-head ray status
-
-ray-logs:
-	@echo "📝 Ray Job Logs:"
-	@docker compose exec ray-head /app/scripts/job_management.sh logs
-
-ray-stop-serve:
-	@echo "🛑 Stopping Ray Serve..."
-	@docker compose exec ray-head python -c "from ray import serve; serve.shutdown()"
-
-ray-monitor:
-	@echo "📊 Monitoring Ray Serve (continuous)..."
-	@docker compose exec ray-head python /app/scripts/monitor_service.py
-
-ray-check:
-	@echo "📊 Quick Ray Serve status check..."
-	@docker compose exec ray-head python /app/scripts/monitor_service.py --quick
-
 # Example usage
 example:
 	@echo "📝 Example API usage:"
@@ -163,8 +154,8 @@ example:
 	@echo "   curl -X POST http://localhost:8080/transcribe -H 'Content-Type: application/json' -d '{"
 	@echo "     \"file_id\": \"your-file-id\","
 	@echo "     \"model\": \"base\","
-	@echo "     \"diarize\": true,"
-	@echo "     \"preprocess\": true"
+	@echo "     \"diarize\": false,"
+	@echo "     \"preprocess\": false"
 	@echo "   }'"
 	@echo ""
 	@echo "3. Check status:"
@@ -173,6 +164,15 @@ example:
 	@echo "4. Download results:"
 	@echo "   curl http://localhost:8080/results/your-task-id/srt"
 	@echo ""
-	@echo "5. Ray Serve endpoints:"
-	@echo "   curl http://localhost:8000/health"
-	@echo "   curl -X POST http://localhost:8000/transcribe -H 'Content-Type: application/json' -d '{\"audio_path\": \"/path/to/audio.wav\"}'"
+	@echo "Test commands:"
+	@echo "  make test-direct TEST_AUDIO_FILE=/path/to/audio.wav"
+
+# Verify ML dependencies
+verify-deps:
+	@echo "🔍 Verifying ML dependencies in API container..."
+	@docker compose exec api python /app/scripts/verify_ml_deps.py
+
+# Test inside container
+test-container:
+	@echo "🧪 Running tests inside API container..."
+	@docker compose exec api bash /app/scripts/test_inside_container.sh
