@@ -11,7 +11,7 @@ help:
 	@echo "  logs         - Show service logs"
 	@echo "  status       - Show service status"
 	@echo "  test         - Run API tests (requires TEST_AUDIO_FILE)"
-	@echo "  test-direct  - Run direct transcription test (no Ray dependency)"
+	@echo "  test-ray     - Run Ray-based transcription test"
 	@echo "  verify-deps  - Verify ML dependencies in API container"
 	@echo "  test-container - Run tests inside API container"
 
@@ -71,15 +71,15 @@ test:
 	@echo "🧪 Running API tests..."
 	@python3 scripts/test_api.py --audio-file "$(TEST_AUDIO_FILE)"
 
-# Run direct transcription test (no Ray dependency)
-test-direct:
+# Run Ray transcription test
+test-ray:
 	@if [ -z "$(TEST_AUDIO_FILE)" ]; then \
 		echo "❌ Please set TEST_AUDIO_FILE environment variable"; \
-		echo "Example: make test-direct TEST_AUDIO_FILE=/path/to/audio.wav"; \
+		echo "Example: make test-ray TEST_AUDIO_FILE=/path/to/audio.wav"; \
 		exit 1; \
 	fi
-	@echo "🧪 Running direct transcription test..."
-	@python3 scripts/test_direct.py "$(TEST_AUDIO_FILE)"
+	@echo "🧪 Running Ray-based transcription test..."
+	@python3 scripts/test_ray.py "$(TEST_AUDIO_FILE)"
 
 # Clean up everything
 clean:

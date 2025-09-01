@@ -1,14 +1,13 @@
 """
 src/services/transcription_service.py
 
-Hybrid transcription service that uses Ray Jobs + Actors for optimal performance
-with visible driver logs.
+Corrected Ray-based transcription service using Ray Actors directly.
+No Docker commands, pure Ray architecture.
 """
 
 import asyncio
 import uuid
 import ray
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -19,15 +18,21 @@ from src.models.videotools_model import (
     TaskRespModel,
     languageDetectionModel,
 )
-from src.models.pydantic_models import JSONModel, ASRModel, WordModel, SegmentModel
+from src.models.pydantic_models import (
+    JSONModel,
+    ASRModel,
+    WordModel,
+    SegmentModel,
+    EventModel,
+)
 from src.database.mongodb import MongoDB
 from src.utils.ray_client import RayClient
 
 
-class HybridTranscriptionService:
+class RayTranscriptionService:
     """
-    Hybrid service that submits Ray Jobs for transcription tasks.
-    This gives us Ray Actor performance with visible driver logs.
+    Ray-based transcription service using Ray Actors directly.
+    No subprocess calls, pure distributed processing.
     """
 
     def __init__(self, db: MongoDB, ray_client: RayClient):
@@ -35,7 +40,7 @@ class HybridTranscriptionService:
         self.ray_client = ray_client
 
     async def start_transcription(self, request: TranscriptionReqModel) -> str:
-        """Start a new transcription task using Ray Job submission."""
+        """Start a new transcription task using Ray Actors."""
         task_id = str(uuid.uuid4())
 
         # Create task record
@@ -57,20 +62,22 @@ class HybridTranscriptionService:
 
         await self.db.create_task(task_data)
 
-        # Submit as Ray Job for visible logs
-        asyncio.create_task(self._submit_transcription_job(task_id, request))
+        # Process transcription asynchronously using Ray
+        asyncio.create_task(self._process_transcription_with_ray(task_id, request))
 
         return task_id
 
-    async def _submit_transcription_job(
+    async def _process_transcription_with_ray(
         self, task_id: str, request: TranscriptionReqModel
     ):
-        """Submit transcription as Ray Job with actor-based processing."""
-        try:
-            # Update status to submitted
-            await self.db.update_task(task_id, {"status": "submitted"})
+        """Process transcription using Ray Actors."""
+        temp_path = None
 
-            # Get file and prepare for processing
+        try:
+            # Update status to processing
+            await self.db.update_task(task_id, {"status": "processing"})
+
+            # Get file and create temp path
             file_data, filename = await self.db.get_file(request.file_id)
             if not file_data:
                 await self.db.update_task(
@@ -78,7 +85,7 @@ class HybridTranscriptionService:
                 )
                 return
 
-            # Create temp file path for Ray Job
+            # Create temp file for processing
             temp_dir = Path("/app/temp")
             temp_dir.mkdir(exist_ok=True)
             temp_path = temp_dir / f"{task_id}_{filename}"
@@ -86,33 +93,88 @@ class HybridTranscriptionService:
             with open(temp_path, "wb") as f:
                 f.write(file_data)
 
-            # Submit Ray Job
-            job_config = {
-                "task_id": task_id,
-                "audio_path": str(temp_path),
-                "model": request.model,
-                "language": request.language if request.language != "auto" else None,
-                "initial_prompt": request.prompt,
-                "diarize": request.diarize,
-                "use_gpu": request.gpu,
-                "preprocess": request.preprocess,
-            }
+            print(f"🚀 Starting Ray Actor transcription: {task_id}")
+            print(f"📁 Temp file: {temp_path} ({len(file_data)} bytes)")
 
-            print(f"🚀 Submitting Ray Job for task {task_id}")
+            # Ensure Ray is initialized
+            if not ray.is_initialized():
+                try:
+                    ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                    print("✅ Connected to Ray cluster")
+                except Exception as e:
+                    print(f"❌ Ray connection failed: {e}")
+                    # Fallback to local Ray for development
+                    ray.init(ignore_reinit_error=True)
+                    print("✅ Initialized local Ray")
 
-            # Submit job using Ray Jobs API
-            ray_job_id = self._submit_ray_job(job_config)
+            # Import and use Ray Actor
+            from src.services.ray_actors import TranscriptionCoordinator
 
-            # Store Ray job ID for tracking
-            await self.db.update_task(
-                task_id, {"ray_job_id": ray_job_id, "status": "running"}
+            # Create coordinator actor
+            coordinator = TranscriptionCoordinator.remote()
+
+            # Process transcription using Ray Actor
+            print("🎯 Submitting to Ray TranscriptionCoordinator...")
+
+            result_ref = coordinator.process_transcription.remote(
+                audio_path=str(temp_path),
+                model_size=request.model,
+                language=request.language if request.language != "auto" else None,
+                initial_prompt=request.prompt,
+                diarize=request.diarize,  # Will be implemented later
+                use_gpu=request.gpu,
+                max_segment_duration=600.0,
             )
 
-            # Monitor job completion asynchronously
-            asyncio.create_task(self._monitor_ray_job(task_id, ray_job_id, request))
+            # Get result with timeout
+            try:
+                result = ray.get(result_ref, timeout=600)  # 10 minute timeout
+                print("✅ Ray Actor transcription completed")
+            except ray.exceptions.RayTaskError as e:
+                print(f"❌ Ray Actor error: {e}")
+                raise Exception(f"Ray transcription failed: {str(e)}")
+            except ray.exceptions.GetTimeoutError:
+                print(f"❌ Ray Actor timeout after 10 minutes")
+                raise Exception("Ray transcription timed out")
+
+            if result:
+                print(f"✅ Transcription completed successfully: {task_id}")
+
+                # Store results in database
+                await self._store_ray_results(task_id, result, request)
+
+                # Update task status
+                await self.db.update_task(
+                    task_id,
+                    {
+                        "status": "completed",
+                        "completed_at": datetime.utcnow(),
+                        "result_summary": {
+                            "language": result.get("transcription", {}).get("language"),
+                            "duration": result.get("processing_info", {}).get(
+                                "total_duration", 0
+                            ),
+                            "words_count": len(
+                                result.get("transcription", {}).get("words", [])
+                            ),
+                            "segments_count": len(
+                                result.get("transcription", {}).get("segments", [])
+                            ),
+                            "model": request.model,
+                            "gpu_used": request.gpu,
+                        },
+                    },
+                )
+            else:
+                raise Exception("Ray Actor returned empty result")
 
         except Exception as e:
             error_msg = str(e)
+            print(f"❌ Ray transcription failed for task {task_id}: {error_msg}")
+            import traceback
+
+            traceback.print_exc()
+
             await self.db.update_task(
                 task_id,
                 {
@@ -121,375 +183,358 @@ class HybridTranscriptionService:
                     "failed_at": datetime.utcnow(),
                 },
             )
-            print(f"❌ Job submission failed for task {task_id}: {error_msg}")
 
-    def _submit_ray_job(self, config: Dict[str, Any]) -> str:
-        """Submit Ray Job and return job ID."""
-        import subprocess
-        import json
-        import tempfile
+        finally:
+            # Cleanup temp files
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                    print(f"🧹 Cleaned up temp audio file: {temp_path}")
+                except Exception as e:
+                    print(f"⚠️ Failed to cleanup temp audio file: {e}")
+
+    async def _store_ray_results(
+        self, task_id: str, ray_result: dict, request: TranscriptionReqModel
+    ):
+        """Store Ray transcription results in database."""
+        from src.utils.subtitle_formats import SubtitleFormatter
 
         try:
-            # Create a proper Python script for the Ray Job
-            job_script_content = f'''
-import sys
-import os
-import ray
-import asyncio
-import json
-from pathlib import Path
-from datetime import datetime
+            transcription = ray_result.get("transcription", {})
 
-# Add src to path
-sys.path.append("/app/src")
-sys.path.append("/app")
-
-async def run_transcription():
-    """Main transcription function running in Ray Job."""
-    
-    config = {json.dumps(config)}
-    task_id = config["task_id"]
-    
-    print(f"🎯 Ray Job started for task: {{task_id}}")
-    print(f"📁 Audio path: {{config['audio_path']}}")
-    print(f"🤖 Model: {{config['model']}}")
-    print(f"🗣️ Diarization: {{config['diarize']}}")
-    
-    try:
-        # Initialize Ray - connect to existing cluster
-        ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
-        print("✅ Connected to Ray cluster from job")
-        
-        # Import after Ray initialization
-        from src.services.ray_actors import TranscriptionCoordinator
-        from src.database.mongodb import MongoDB
-        
-        print("✅ Imports successful")
-        
-        # Create transcription coordinator
-        coordinator = TranscriptionCoordinator.remote()
-        coordinator.initialize_actors.remote(config["model"], config["use_gpu"])
-        print("✅ Transcription coordinator initialized")
-        
-        # Process transcription using Ray Actors
-        result_ref = coordinator.process_transcription.remote(
-            audio_path=config["audio_path"],
-            model_size=config["model"],
-            language=config.get("language"),
-            initial_prompt=config.get("initial_prompt"),
-            diarize=config["diarize"],
-            use_gpu=config["use_gpu"]
-        )
-        
-        print("⏳ Processing transcription...")
-        result = ray.get(result_ref)
-        print("✅ Transcription processing completed")
-        
-        # Connect to MongoDB to store results
-        mongodb_url = "mongodb://admin:password123@mongodb:27017/transcription_db?authSource=admin"
-        db = MongoDB(mongodb_url)
-        await db.connect()
-        print("✅ Connected to MongoDB")
-        
-        # Store results in database
-        await store_transcription_results(db, task_id, result)
-        print("✅ Results stored in database")
-        
-        # Update task status
-        await db.update_task(task_id, {{
-            "status": "completed",
-            "completed_at": datetime.utcnow(),
-            "result_summary": {{
-                "language": result.get("transcription", {{}}).get("language"),
-                "duration": result.get("processing_info", {{}}).get("total_duration", 0),
-                "words_count": len(result.get("transcription", {{}}).get("words", [])),
-                "segments_count": len(result.get("transcription", {{}}).get("segments", []))
-            }}
-        }})
-        
-        print(f"🎉 Task {{task_id}} completed successfully!")
-        
-        # Cleanup temp file
-        try:
-            Path(config["audio_path"]).unlink(missing_ok=True)
-            print("✅ Temp file cleaned up")
-        except Exception as e:
-            print(f"⚠️ Failed to cleanup temp file: {{e}}")
-            
-        await db.disconnect()
-            
-    except Exception as e:
-        print(f"❌ Ray Job failed: {{e}}")
-        import traceback
-        traceback.print_exc()
-        
-        # Update task status to failed
-        try:
-            from src.database.mongodb import MongoDB
-            mongodb_url = "mongodb://admin:password123@mongodb:27017/transcription_db?authSource=admin"
-            db = MongoDB(mongodb_url)
-            await db.connect()
-            await db.update_task(task_id, {{
-                "status": "failed",
-                "error_message": str(e),
-                "failed_at": datetime.utcnow()
-            }})
-            await db.disconnect()
-        except Exception as db_error:
-            print(f"❌ Failed to update task status: {{db_error}}")
-        
-        raise
-
-async def store_transcription_results(db, task_id, ray_result):
-    """Store transcription results in database."""
-    from src.utils.subtitle_formats import SubtitleFormatter
-    from src.models.pydantic_models import WordModel, SegmentModel, JSONModel
-    
-    transcription = ray_result.get("transcription", {{}})
-    
-    # Convert to our models
-    words = [
-        WordModel(
-            start=word["start"],
-            end=word["end"], 
-            text=word["text"],
-            confidence=word.get("confidence"),
-            speaker=word.get("speaker")
-        )
-        for word in transcription.get("words", [])
-    ]
-    
-    segments = [
-        SegmentModel(
-            start=segment["start"],
-            end=segment["end"],
-            text=segment["text"],
-            words=[
+            # Convert to our models
+            words = [
                 WordModel(
                     start=word["start"],
                     end=word["end"],
-                    text=word["text"], 
+                    text=word["text"],
                     confidence=word.get("confidence"),
-                    speaker=word.get("speaker")
+                    speaker=word.get("speaker"),
                 )
-                for word in segment.get("words", [])
-            ]
-        )
-        for segment in transcription.get("segments", [])
-    ]
-    
-    json_result = JSONModel(
-        text=transcription.get("text", ""),
-        segments=segments,
-        language=transcription.get("language"),
-        language_probability=transcription.get("language_probability")
-    )
-    
-    # Generate subtitle formats
-    subtitle_formatter = SubtitleFormatter()
-    srt_content = subtitle_formatter.to_srt(segments)
-    vtt_content = subtitle_formatter.to_vtt(segments)
-    txt_content = transcription.get("text", "")
-    
-    # Store results
-    result_data = {{
-        "json_result": json_result.dict(),
-        "srt_content": srt_content,
-        "vtt_content": vtt_content,
-        "txt_content": txt_content,
-        "ray_result": ray_result,  # Store complete result
-    }}
-    
-    await db.store_result(task_id, result_data)
-
-if __name__ == "__main__":
-    asyncio.run(run_transcription())
-'''
-
-            # Write script to temporary file
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-                f.write(job_script_content)
-                script_path = f.name
-
-            # Submit job using ray job submit command - FIXED: Use --submission-id instead of --job-name
-            submission_id = f"transcription-{config['task_id'][:8]}"
-            cmd = [
-                "ray",
-                "job",
-                "submit",
-                "--address=ray://ray-head:10001",
-                "--working-dir=/app",
-                f"--submission-id={submission_id}",  # FIXED: Changed from --job-name to --submission-id
-                "--",
-                "python",
-                script_path,
+                for word in transcription.get("words", [])
             ]
 
-            print(f"🚀 Executing: {' '.join(cmd)}")
+            segments = [
+                SegmentModel(
+                    start=segment["start"],
+                    end=segment["end"],
+                    text=segment["text"],
+                    words=[
+                        WordModel(
+                            start=word["start"],
+                            end=word["end"],
+                            text=word["text"],
+                            confidence=word.get("confidence"),
+                            speaker=word.get("speaker"),
+                        )
+                        for word in segment.get("words", [])
+                    ],
+                )
+                for segment in transcription.get("segments", [])
+            ]
 
-            # Execute ray job submit
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/app")
+            json_result = JSONModel(
+                text=transcription.get("text", ""),
+                segments=segments,
+                language=transcription.get("language"),
+                language_probability=transcription.get("language_probability"),
+            )
 
-            if result.returncode == 0:
-                # Extract job ID from output
-                output_lines = result.stdout.strip().split("\n")
-                for line in output_lines:
-                    if "submitted successfully" in line:
-                        print(f"✅ Ray Job submitted successfully")
-                        # Use the submission_id as the job_id
-                        return submission_id
+            # Generate subtitle formats
+            subtitle_formatter = SubtitleFormatter()
+            srt_content = subtitle_formatter.to_srt(segments)
+            vtt_content = subtitle_formatter.to_vtt(segments)
+            txt_content = transcription.get("text", "")
 
-                # Fallback - use submission_id
-                print(f"✅ Ray Job submitted (using submission_id): {submission_id}")
-                return submission_id
-            else:
-                error_msg = f"ray job submit failed: {result.stderr}"
-                print(f"❌ {error_msg}")
-                print(f"❌ stdout: {result.stdout}")
-                raise Exception(error_msg)
+            # Create ASR result if requested
+            asr_result = None
+            if request.asr_format:
+                asr_result = self._create_asr_result(transcription, request.model)
+
+            # Store results
+            result_data = {
+                "json_result": json_result.dict(),
+                "srt_content": srt_content,
+                "vtt_content": vtt_content,
+                "txt_content": txt_content,
+                "asr_result": asr_result.dict() if asr_result else None,
+                "ray_result": ray_result,
+            }
+
+            await self.db.store_result(task_id, result_data)
+            print(f"✅ Ray results stored successfully for task {task_id}")
 
         except Exception as e:
-            print(f"❌ Failed to submit Ray Job: {e}")
+            print(f"❌ Error storing Ray results for task {task_id}: {e}")
             raise
 
-    async def _monitor_ray_job(
-        self, task_id: str, ray_job_id: str, request: TranscriptionReqModel
-    ):
-        """Monitor Ray Job status and handle completion."""
-        import subprocess
-
+    def _create_asr_result(self, transcription: dict, model: str) -> ASRModel:
+        """Create ASR format result from Ray transcription."""
         try:
-            print(f"📊 Monitoring Ray Job {ray_job_id} for task {task_id}")
+            events = []
 
-            # Poll job status using ray job status command
-            while True:
-                try:
-                    # Get job status
-                    result = subprocess.run(
-                        [
-                            "ray",
-                            "job",
-                            "status",
-                            ray_job_id,
-                            "--address=ray://ray-head:10001",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
+            for word in transcription.get("words", []):
+                event = EventModel(
+                    content=word["text"],
+                    start_time=word["start"],
+                    end_time=word["end"],
+                    event_type="word",
+                    language=transcription.get("language"),
+                    confidence=word.get("confidence"),
+                    speaker=word.get("speaker"),
+                    is_eol=False,
+                    is_eos=False,
+                )
+                events.append(event)
 
-                    if result.returncode == 0:
-                        status_output = result.stdout.strip()
-                        print(f"📈 Job {ray_job_id} status output: {status_output}")
-
-                        # Check if job is completed
-                        if "SUCCEEDED" in status_output:
-                            print(f"✅ Ray Job {ray_job_id} completed successfully")
-                            # Job should have updated the task status already
-                            break
-                        elif "FAILED" in status_output:
-                            # Get job logs
-                            logs_result = subprocess.run(
-                                [
-                                    "ray",
-                                    "job",
-                                    "logs",
-                                    ray_job_id,
-                                    "--address=ray://ray-head:10001",
-                                ],
-                                capture_output=True,
-                                text=True,
-                                timeout=30,
-                            )
-
-                            logs = (
-                                logs_result.stdout
-                                if logs_result.returncode == 0
-                                else "Could not retrieve logs"
-                            )
-                            error_msg = f"Ray Job failed\nLogs:\n{logs}"
-
-                            await self.db.update_task(
-                                task_id,
-                                {
-                                    "status": "failed",
-                                    "error_message": error_msg,
-                                    "failed_at": datetime.utcnow(),
-                                },
-                            )
-                            print(f"❌ Ray Job {ray_job_id} failed")
-                            break
-                        elif "STOPPED" in status_output:
-                            await self.db.update_task(
-                                task_id,
-                                {
-                                    "status": "cancelled",
-                                    "cancelled_at": datetime.utcnow(),
-                                },
-                            )
-                            print(f"🛑 Ray Job {ray_job_id} was stopped")
-                            break
-                    else:
-                        print(f"⚠️ Could not get job status: {result.stderr}")
-
-                except subprocess.TimeoutExpired:
-                    print("⏰ Job status check timed out, continuing...")
-                except Exception as status_error:
-                    print(f"❌ Error checking job status: {status_error}")
-
-                await asyncio.sleep(15)  # Check every 15 seconds
-
-        except Exception as e:
-            error_msg = f"Job monitoring failed: {str(e)}"
-            await self.db.update_task(
-                task_id,
-                {
-                    "status": "failed",
-                    "error_message": error_msg,
-                    "failed_at": datetime.utcnow(),
+            return ASRModel(
+                asr_model=model,
+                created_at=datetime.utcnow().isoformat(),
+                generated_by="advanced-transcription-service-ray",
+                version=1,
+                events=events,
+                language=transcription.get("language"),
+                language_probability=transcription.get("language_probability"),
+                duration=transcription.get("duration"),
+                processing_info={
+                    "model": model,
+                    "segments_count": len(transcription.get("segments", [])),
+                    "words_count": len(transcription.get("words", [])),
+                    "processing_mode": "ray_actors",
                 },
             )
-            print(f"❌ Job monitoring failed for task {task_id}: {error_msg}")
+
+        except Exception as e:
+            print(f"Error creating ASR result: {e}")
+            return ASRModel(
+                asr_model=model,
+                created_at=datetime.utcnow().isoformat(),
+                generated_by="advanced-transcription-service-ray",
+                version=1,
+                events=[],
+                language=transcription.get("language", "en"),
+                language_probability=transcription.get("language_probability", 0.5),
+            )
+
+    async def detect_language(self, file_id: str) -> languageDetectionModel:
+        """Detect language using Ray Actor."""
+        temp_path = None
+
+        try:
+            # Get file
+            file_data, filename = await self.db.get_file(file_id)
+            if not file_data:
+                raise Exception("File not found")
+
+            # Create temp file
+            temp_dir = Path("/app/temp")
+            temp_dir.mkdir(exist_ok=True)
+            temp_path = temp_dir / f"lang_{file_id}_{filename}"
+
+            with open(temp_path, "wb") as f:
+                f.write(file_data)
+
+            print(f"🔍 Starting Ray language detection for file: {file_id}")
+
+            # Ensure Ray is initialized
+            if not ray.is_initialized():
+                try:
+                    ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
+                except:
+                    ray.init(ignore_reinit_error=True)
+
+            # Use Ray Actor for language detection
+            from src.services.ray_actors import WhisperTranscriptionActor
+
+            # Create language detection actor (CPU only for speed)
+            lang_actor = WhisperTranscriptionActor.remote(
+                model_size="base", device="cpu"  # Use CPU for quick language detection
+            )
+
+            # Detect language
+            result_ref = lang_actor.detect_language.remote(str(temp_path))
+            result = ray.get(result_ref)
+
+            return languageDetectionModel(
+                file_id=file_id,
+                language=result["language"],
+                confidence=result["confidence"],
+            )
+
+        except Exception as e:
+            print(f"❌ Ray language detection error: {e}")
+            # Return fallback result
+            return languageDetectionModel(
+                file_id=file_id, language="en", confidence=0.5
+            )
+        finally:
+            # Cleanup temp file
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except:
+                    pass
+
+    # Task management methods
+    async def get_task(self, task_id: str) -> Optional[TaskRespModel]:
+        """Get task by ID."""
+        task = await self.db.get_task(task_id)
+        if not task:
+            return None
+
+        return TaskRespModel(
+            id=task["task_id"],
+            status=task["status"],
+            result=task.get("result_summary"),
+            error_message=task.get("error_message"),
+        )
+
+    async def list_tasks(self, skip: int = 0, limit: int = 100) -> List[TaskRespModel]:
+        """List tasks with pagination."""
+        tasks = await self.db.list_tasks(skip=skip, limit=limit)
+
+        return [
+            TaskRespModel(
+                id=task["task_id"],
+                status=task["status"],
+                result=task.get("result_summary"),
+                error_message=task.get("error_message"),
+            )
+            for task in tasks
+        ]
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task."""
-        task = await self.db.get_task(task_id)
-        if not task:
-            return False
-
-        # Cancel Ray Job if it exists
-        if "ray_job_id" in task:
-            try:
-                result = subprocess.run(
-                    [
-                        "ray",
-                        "job",
-                        "stop",
-                        task["ray_job_id"],
-                        "--address=ray://ray-head:10001",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if result.returncode == 0:
-                    print(f"✅ Cancelled Ray Job: {task['ray_job_id']}")
-                else:
-                    print(f"⚠️ Failed to cancel Ray Job: {result.stderr}")
-            except Exception as e:
-                print(f"⚠️ Failed to cancel Ray Job: {e}")
-
-        # Update task status
+        # For Ray tasks, we could implement cancellation by maintaining
+        # a registry of running Ray tasks and calling ray.cancel()
         success = await self.db.update_task(
             task_id, {"status": "cancelled", "cancelled_at": datetime.utcnow()}
         )
         return success
 
+    # Result methods (same as before)
+    async def get_json_result(self, task_id: str) -> Optional[JSONModel]:
+        """Get JSON result for task."""
+        try:
+            result = await self.db.get_result(task_id)
+            if not result or "json_result" not in result.get("result_data", {}):
+                return None
+            return JSONModel(**result["result_data"]["json_result"])
+        except Exception as e:
+            print(f"Error getting JSON result: {e}")
+            return None
+
+    async def get_asr_result(self, task_id: str) -> Optional[ASRModel]:
+        """Get ASR result for task."""
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            result_data = result.get("result_data", {})
+            asr_data = result_data.get("asr_result")
+
+            if not asr_data:
+                # Generate ASR on the fly if not available
+                ray_result = result_data.get("ray_result", {})
+                if ray_result and ray_result.get("transcription"):
+                    asr_result = self._create_asr_result(
+                        ray_result["transcription"], "base"
+                    )
+                    return asr_result
+                return None
+
+            return ASRModel(**asr_data)
+        except Exception as e:
+            print(f"Error getting ASR result: {e}")
+            return None
+
+    async def get_srt_result(self, task_id: str) -> Optional[str]:
+        """Get SRT result."""
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            result_data = result.get("result_data", {})
+            srt_content = result_data.get("srt_content")
+
+            if not srt_content:
+                # Generate SRT on the fly if not available
+                json_result = result_data.get("json_result")
+                if json_result:
+                    from src.utils.subtitle_formats import SubtitleFormatter
+
+                    json_model = JSONModel(**json_result)
+                    subtitle_formatter = SubtitleFormatter()
+                    srt_content = subtitle_formatter.to_srt(json_model.segments)
+                    return srt_content
+                return ""
+
+            return srt_content
+        except Exception as e:
+            print(f"Error getting SRT result: {e}")
+            return None
+
+    async def get_vtt_result(self, task_id: str) -> Optional[str]:
+        """Get VTT result."""
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            result_data = result.get("result_data", {})
+            vtt_content = result_data.get("vtt_content")
+
+            if not vtt_content:
+                # Generate VTT on the fly if not available
+                json_result = result_data.get("json_result")
+                if json_result:
+                    from src.utils.subtitle_formats import SubtitleFormatter
+
+                    json_model = JSONModel(**json_result)
+                    subtitle_formatter = SubtitleFormatter()
+                    vtt_content = subtitle_formatter.to_vtt(json_model.segments)
+                    return vtt_content
+                return ""
+
+            return vtt_content
+        except Exception as e:
+            print(f"Error getting VTT result: {e}")
+            return None
+
+    async def get_txt_result(self, task_id: str) -> Optional[str]:
+        """Get TXT result."""
+        try:
+            result = await self.db.get_result(task_id)
+            if not result:
+                return None
+
+            result_data = result.get("result_data", {})
+            txt_content = result_data.get("txt_content")
+
+            if not txt_content:
+                # Generate TXT on the fly if not available
+                json_result = result_data.get("json_result")
+                if json_result:
+                    return json_result.get("text", "")
+
+                ray_result = result_data.get("ray_result")
+                if ray_result and ray_result.get("transcription"):
+                    return ray_result["transcription"].get("text", "")
+
+                return ""
+
+            return txt_content
+        except Exception as e:
+            print(f"Error getting TXT result: {e}")
+            return None
+
+    # URL transcription
     async def start_transcription_from_url(
         self, request: TranscriptionURLReqModel
     ) -> str:
-        """Start transcription task from URL."""
+        """Start transcription from URL."""
         task_id = str(uuid.uuid4())
 
         # Create task record
@@ -527,12 +572,14 @@ if __name__ == "__main__":
             await self.db.update_task(task_id, {"status": "downloading"})
 
             # Download file from URL
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(request.url)
                 response.raise_for_status()
 
                 # Get filename from URL or use default
                 filename = Path(request.url).name or f"downloaded_{task_id[:8]}"
+                if not filename.endswith((".wav", ".mp3", ".mp4", ".m4a", ".flac")):
+                    filename += ".mp3"  # Default extension
 
                 # Store file
                 file_id = await self.db.store_file(
@@ -557,163 +604,16 @@ if __name__ == "__main__":
                 callback_url=request.callback_url,
             )
 
-            # Submit transcription job
-            await self._submit_transcription_job(task_id, transcription_request)
+            # Process transcription using Ray
+            await self._process_transcription_with_ray(task_id, transcription_request)
 
         except Exception as e:
+            error_msg = str(e)
+            print(f"❌ URL transcription failed for task {task_id}: {error_msg}")
             await self.db.update_task(
-                task_id, {"status": "failed", "error_message": str(e)}
-            )
-
-    # Task management methods
-    async def get_task(self, task_id: str) -> Optional[TaskRespModel]:
-        """Get task by ID."""
-        task = await self.db.get_task(task_id)
-        if not task:
-            return None
-
-        return TaskRespModel(
-            id=task["task_id"],
-            status=task["status"],
-            result=task.get("result_summary"),
-            error_message=task.get("error_message"),
-        )
-
-    async def list_tasks(self, skip: int = 0, limit: int = 100) -> List[TaskRespModel]:
-        """List tasks with pagination."""
-        tasks = await self.db.list_tasks(skip=skip, limit=limit)
-
-        return [
-            TaskRespModel(
-                id=task["task_id"],
-                status=task["status"],
-                result=task.get("result_summary"),
-                error_message=task.get("error_message"),
-            )
-            for task in tasks
-        ]
-
-    # Result retrieval methods (same as before)
-    async def get_json_result(self, task_id: str) -> Optional[JSONModel]:
-        """Get JSON result for task."""
-        result = await self.db.get_result(task_id)
-        if not result or "json_result" not in result["result_data"]:
-            return None
-
-        return JSONModel(**result["result_data"]["json_result"])
-
-    async def get_asr_result(self, task_id: str) -> Optional[ASRModel]:
-        """Get ASR result for task."""
-        result = await self.db.get_result(task_id)
-        if not result or not result["result_data"].get("asr_result"):
-            return None
-
-        return ASRModel(**result["result_data"]["asr_result"])
-
-    async def get_srt_result(self, task_id: str) -> Optional[str]:
-        """Get SRT subtitle result for task."""
-        result = await self.db.get_result(task_id)
-        if not result:
-            return None
-        return result["result_data"].get("srt_content")
-
-    async def get_vtt_result(self, task_id: str) -> Optional[str]:
-        """Get VTT subtitle result for task."""
-        result = await self.db.get_result(task_id)
-        if not result:
-            return None
-        return result["result_data"].get("vtt_content")
-
-    async def get_txt_result(self, task_id: str) -> Optional[str]:
-        """Get plain text result for task."""
-        result = await self.db.get_result(task_id)
-        if not result:
-            return None
-        return result["result_data"].get("txt_content")
-
-    async def detect_language(self, file_id: str) -> languageDetectionModel:
-        """Detect language using a simple Ray task (not actor)."""
-        try:
-            # Get file
-            file_data, filename = await self.db.get_file(file_id)
-            if not file_data:
-                raise Exception("File not found")
-
-            # Create temp file
-            temp_dir = Path("/app/temp")
-            temp_dir.mkdir(exist_ok=True)
-            temp_path = temp_dir / f"lang_{file_id}_{filename}"
-
-            with open(temp_path, "wb") as f:
-                f.write(file_data)
-
-            # Use a simple Ray task instead of actor to avoid memory issues
-            @ray.remote
-            def simple_language_detection(audio_path: str):
-                try:
-                    from faster_whisper import WhisperModel
-                    import torch
-
-                    device = (
-                        "cpu"  # Use CPU for language detection to avoid GPU conflicts
-                    )
-                    compute_type = "int8"
-
-                    model = WhisperModel(
-                        "base",
-                        device=device,
-                        compute_type=compute_type,
-                        download_root="/app/models/whisper",
-                    )
-
-                    # Just detect language, don't transcribe
-                    segments, info = model.transcribe(
-                        audio_path,
-                        language=None,
-                        vad_filter=True,
-                        vad_parameters=dict(min_silence_duration_ms=500),
-                    )
-
-                    # Consume first segment to trigger language detection
-                    next(segments, None)
-
-                    return {
-                        "language": info.language,
-                        "confidence": info.language_probability,
-                    }
-
-                except Exception as e:
-                    print(f"Language detection task failed: {e}")
-                    # Fallback to English
-                    return {"language": "en", "confidence": 0.5}
-
-            # Ensure Ray is initialized
-            if not ray.is_initialized():
-                ray.init(address="ray://ray-head:10001", ignore_reinit_error=True)
-
-            # Submit task and get result
-            result_ref = simple_language_detection.remote(str(temp_path))
-            result = ray.get(result_ref)
-
-            # Cleanup temp file
-            try:
-                temp_path.unlink(missing_ok=True)
-            except:
-                pass
-
-            return languageDetectionModel(
-                file_id=file_id,
-                language=result["language"],
-                confidence=result["confidence"],
-            )
-
-        except Exception as e:
-            print(f"Language detection error: {e}")
-            # Fallback result
-            return languageDetectionModel(
-                file_id=file_id, language="en", confidence=0.5
+                task_id, {"status": "failed", "error_message": error_msg}
             )
 
 
 # For backward compatibility
-TranscriptionService = HybridTranscriptionService
+TranscriptionService = RayTranscriptionService
