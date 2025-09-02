@@ -1,0 +1,78 @@
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+USER root
+WORKDIR /app
+
+# Install Python 3.12 and system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    libsndfile1-dev \
+    build-essential \
+    pkg-config \
+    git \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.12 as default and create virtual environment
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python && \
+    python3 -m venv /opt/venv
+
+# Activate virtual environment
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install STABLE PyTorch version (2.1.x series is very stable)
+RUN pip install --no-cache-dir torch==2.1.2+cu121 torchaudio==2.1.2+cu121 torchvision==0.16.2+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
+
+# Install Ray
+RUN pip install --no-cache-dir ray[default]==2.49.0 ray[serve]==2.49.0
+
+# Install audio processing
+RUN pip install --no-cache-dir faster-whisper==1.0.3 librosa==0.10.1 soundfile pydub
+
+# Install scientific computing
+RUN pip install --no-cache-dir numpy==1.26.4 scipy
+
+# Install transformers (let pip resolve versions)
+RUN pip install --no-cache-dir transformers accelerate sentencepiece
+
+# Install database and utilities
+RUN pip install --no-cache-dir pymongo motor redis protobuf requests httpx
+
+# Copy application code
+COPY ./src /app/src
+COPY ./scripts /app/scripts
+
+# Create directories
+RUN mkdir -p /app/temp /app/models /app/logs
+
+# Create ray user
+RUN useradd -m -s /bin/bash ray || echo "User ray already exists"
+RUN chown -R ray:ray /app /opt/venv
+
+# Set environment variables for WSL CUDA compatibility
+ENV PYTHONPATH=/app:/app/src
+ENV PYTHONUNBUFFERED=1
+ENV RAY_DISABLE_IMPORT_WARNING=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="/opt/venv/bin:/usr/local/cuda/bin:$PATH"
+ENV CUDA_LAUNCH_BLOCKING=1
+ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+
+# Switch to ray user
+USER ray
+
+# Expose ports
+EXPOSE 6379 8265 10001 8000
+
+# Default command
+CMD ["bash"]

@@ -32,7 +32,7 @@ services:
   ray-head:
     build:
       context: .
-      dockerfile: Dockerfile.ray
+      dockerfile: Dockerfile.ray.simple
     container_name: transcription_ray_head
     restart: unless-stopped
     command: >

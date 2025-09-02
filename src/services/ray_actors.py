@@ -30,16 +30,39 @@ class WhisperTranscriptionActor:
     """Ray actor for Whisper transcription with better error handling."""
 
     def __init__(self, model_size: str = "base", device: str = "auto"):
+        print(
+            f"[WhisperActor] Starting initialization with model_size={model_size}, device={device}"
+        )
         self.model_size = model_size
         self.device = device
         self.model = None
         self._initialized = False
-        self._load_model()
+        self._error_message = None
+
+        # Don't fail the constructor - defer model loading
+        print(f"[WhisperActor] Constructor completed, will load model on demand")
+
+    def _ensure_model_loaded(self):
+        """Lazy load the model when first needed."""
+        if self._initialized:
+            return True
+
+        if self._error_message:
+            raise RuntimeError(
+                f"Actor previously failed to initialize: {self._error_message}"
+            )
+
+        try:
+            print(f"[WhisperActor] Loading model on demand...")
+            return self._load_model()
+        except Exception as e:
+            self._error_message = str(e)
+            print(f"[WhisperActor] Model loading failed: {e}")
+            raise
 
     def _load_model(self):
         """Load the Whisper model with comprehensive error handling."""
         try:
-            # Test imports first
             print(f"[WhisperActor] Testing imports...")
 
             try:
@@ -74,37 +97,48 @@ class WhisperTranscriptionActor:
                 print(f"[WhisperActor] ❌ faster_whisper import failed: {e}")
                 raise ImportError(f"faster_whisper not available: {e}")
 
-            # Determine device
-            if self.device == "auto":
-                if torch.cuda.is_available():
-                    device = "cuda"
-                    compute_type = "float16"
-                    print(f"[WhisperActor] Using CUDA device")
-                else:
-                    device = "cpu"
-                    compute_type = "int8"
-                    print(f"[WhisperActor] Using CPU device")
-            else:
-                device = self.device
-                compute_type = "float16" if device == "cuda" else "int8"
+            # Safe CUDA detection for WSL
+            device = self._get_safe_device()
+            compute_type = "float16" if device == "cuda" else "int8"
+            print(
+                f"[WhisperActor] Using device: {device} with compute_type: {compute_type}"
+            )
 
             # Create models directory
-            models_dir = Path("/app/models/whisper")
-            models_dir.mkdir(parents=True, exist_ok=True)
+            models_dir = "/app/models/whisper"
+            os.makedirs(models_dir, exist_ok=True)
+            print(f"[WhisperActor] Models directory: {models_dir}")
 
             print(f"[WhisperActor] Loading Whisper model {self.model_size} on {device}")
 
-            self.model = WhisperModel(
-                self.model_size,
-                device=device,
-                compute_type=compute_type,
-                download_root="/app/models/whisper",
-            )
+            # Add timeout and retry logic
+            import time
 
-            print(
-                f"[WhisperActor] ✅ Loaded Whisper model {self.model_size} on {device}"
-            )
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.model = WhisperModel(
+                        self.model_size,
+                        device=device,
+                        compute_type=compute_type,
+                        download_root="/app/models",  # Let it create whisper subdirectory
+                        local_files_only=False,  # Allow downloads
+                    )
+                    print(
+                        f"[WhisperActor] ✅ Loaded Whisper model on attempt {attempt + 1}"
+                    )
+                    break
+                except Exception as model_e:
+                    print(
+                        f"[WhisperActor] Model load attempt {attempt + 1} failed: {model_e}"
+                    )
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(5)  # Wait before retry
+
             self._initialized = True
+            print(f"[WhisperActor] ✅ Initialization completed successfully")
+            return True
 
         except Exception as e:
             print(f"[WhisperActor] ❌ Failed to load Whisper model: {e}")
@@ -112,7 +146,70 @@ class WhisperTranscriptionActor:
 
             traceback.print_exc()
             self._initialized = False
+            self._error_message = str(e)
             raise
+
+    def _get_safe_device(self):
+        """Get a safe device for WSL environment."""
+        try:
+            import torch
+            import subprocess
+            import os
+
+            # Set WSL-friendly environment variables
+            os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+
+            # Force CPU if explicitly requested
+            if self.device == "cpu":
+                print(f"[WhisperActor] CPU explicitly requested")
+                return "cpu"
+
+            # Check if we're in WSL and nvidia-smi works
+            try:
+                result = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=count",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    timeout=5,
+                )
+                nvidia_available = result.returncode == 0
+                print(f"[WhisperActor] nvidia-smi available: {nvidia_available}")
+            except:
+                nvidia_available = False
+                print(f"[WhisperActor] nvidia-smi not available")
+
+            if not nvidia_available:
+                print(f"[WhisperActor] No NVIDIA drivers, using CPU")
+                return "cpu"
+
+            # Safe CUDA test without calling torch.cuda.is_available()
+            try:
+                print(f"[WhisperActor] Testing CUDA device count...")
+                device_count = torch.cuda.device_count()
+                print(f"[WhisperActor] CUDA device count: {device_count}")
+
+                if device_count > 0:
+                    # Very minimal CUDA test
+                    print(f"[WhisperActor] Testing CUDA tensor creation...")
+                    test_tensor = torch.randn(2, 2, device="cuda:0")
+                    _ = test_tensor.cpu()
+                    print(f"[WhisperActor] CUDA test passed, using GPU")
+                    return "cuda"
+                else:
+                    print(f"[WhisperActor] No CUDA devices found, using CPU")
+                    return "cpu"
+
+            except Exception as cuda_e:
+                print(f"[WhisperActor] CUDA test failed: {cuda_e}, using CPU")
+                return "cpu"
+
+        except Exception as e:
+            print(f"[WhisperActor] Device detection failed: {e}, defaulting to CPU")
+            return "cpu"
 
     def transcribe(
         self,
@@ -122,8 +219,8 @@ class WhisperTranscriptionActor:
     ) -> Tuple[List[Dict], str]:
         """Transcribe audio file with detailed error handling."""
 
-        if not self._initialized:
-            raise RuntimeError("WhisperActor not properly initialized")
+        # Ensure model is loaded
+        self._ensure_model_loaded()
 
         try:
             print(f"[WhisperActor] Starting transcription of: {audio_path}")
@@ -255,8 +352,8 @@ class WhisperTranscriptionActor:
     def detect_language(self, audio_path: str) -> Dict[str, Any]:
         """Detect language of audio file."""
 
-        if not self._initialized:
-            raise RuntimeError("WhisperActor not properly initialized")
+        # Ensure model is loaded
+        self._ensure_model_loaded()
 
         try:
             print(f"[WhisperActor] Starting language detection: {audio_path}")
@@ -300,13 +397,23 @@ class WhisperTranscriptionActor:
             return {"language": "en", "confidence": 0.5}
 
     def get_status(self):
-        """Get actor status for debugging."""
-        return {
-            "model_size": self.model_size,
-            "device": self.device,
-            "initialized": self._initialized,
-            "model_loaded": self.model is not None,
-        }
+        """Get actor status for debugging - this should never fail."""
+        try:
+            return {
+                "model_size": self.model_size,
+                "device": self.device,
+                "initialized": self._initialized,
+                "model_loaded": self.model is not None,
+                "error_message": self._error_message,
+            }
+        except Exception as e:
+            return {
+                "model_size": self.model_size,
+                "device": self.device,
+                "initialized": False,
+                "model_loaded": False,
+                "error_message": f"Status check failed: {e}",
+            }
 
 
 @ray.remote
@@ -433,22 +540,40 @@ class TranscriptionCoordinator:
 
             device = "cuda" if use_gpu else "cpu"
 
-            # Test actor creation
+            # Create actor with resource requirements but don't require GPU
             print(f"[TranscriptionCoordinator] Creating WhisperTranscriptionActor...")
-            self.whisper_actor = WhisperTranscriptionActor.remote(model_size, device)
 
-            # Test the actor by getting its status
+            if use_gpu:
+                self.whisper_actor = WhisperTranscriptionActor.options(
+                    num_gpus=0.5,  # Request 0.5 GPU to allow sharing
+                    num_cpus=2,
+                    memory=4000000000,  # 4GB
+                ).remote(model_size, device)
+            else:
+                self.whisper_actor = WhisperTranscriptionActor.options(
+                    num_cpus=2, memory=2000000000  # 2GB for CPU
+                ).remote(model_size, device)
+
+            # Test the actor by getting its status - this should always work
+            print(f"[TranscriptionCoordinator] Testing actor creation...")
             try:
-                status = ray.get(self.whisper_actor.get_status.remote(), timeout=30)
-                print(f"[TranscriptionCoordinator] Whisper actor status: {status}")
-                if not status.get("initialized"):
-                    raise RuntimeError("Whisper actor failed to initialize")
-            except Exception as e:
-                print(f"[TranscriptionCoordinator] ❌ Whisper actor test failed: {e}")
-                raise
+                status = ray.get(self.whisper_actor.get_status.remote(), timeout=60)
+                print(
+                    f"[TranscriptionCoordinator] Whisper actor initial status: {status}"
+                )
 
-            # Only create diarization actor if requested
-            # self.diarization_actor = DiarizationActor.remote(device)
+                # Don't require the actor to be fully initialized yet
+                # Just check that it was created successfully
+                if "model_size" in status:
+                    print(f"[TranscriptionCoordinator] ✅ Actor created successfully")
+                else:
+                    print(
+                        f"[TranscriptionCoordinator] ⚠️ Actor created but status unclear"
+                    )
+
+            except Exception as e:
+                print(f"[TranscriptionCoordinator] ❌ Actor status test failed: {e}")
+                raise RuntimeError(f"Actor creation failed: {e}")
 
             print(f"[TranscriptionCoordinator] ✅ Actors initialized successfully")
             self._initialized = True
@@ -513,15 +638,22 @@ class TranscriptionCoordinator:
                 },
             }
 
-            # Process transcription
+            # Process transcription with extended timeout
             print(f"[TranscriptionCoordinator] Running Whisper transcription...")
 
             try:
-                transcription_result, segment_text = (
-                    await self.whisper_actor.transcribe.remote(
-                        audio_path, language, initial_prompt
-                    )
+                # Use longer timeout for model loading + transcription
+                transcription_future = self.whisper_actor.transcribe.remote(
+                    audio_path, language, initial_prompt
                 )
+
+                print(
+                    f"[TranscriptionCoordinator] Waiting for transcription result (timeout: 10 minutes)..."
+                )
+                transcription_result, segment_text = ray.get(
+                    transcription_future, timeout=600
+                )  # 10 minutes
+
                 print(f"[TranscriptionCoordinator] ✅ Transcription completed")
                 print(
                     f"[TranscriptionCoordinator] Text length: {len(segment_text)} chars"
@@ -533,6 +665,14 @@ class TranscriptionCoordinator:
                     f"[TranscriptionCoordinator] Segments: {len(transcription_result.get('segments', []))}"
                 )
 
+            except ray.exceptions.RayActorError as actor_error:
+                print(f"[TranscriptionCoordinator] ❌ Ray Actor error: {actor_error}")
+                raise RuntimeError(f"Whisper actor failed: {actor_error}")
+            except ray.exceptions.GetTimeoutError:
+                print(
+                    f"[TranscriptionCoordinator] ❌ Transcription timed out after 10 minutes"
+                )
+                raise RuntimeError("Transcription timed out")
             except Exception as e:
                 print(
                     f"[TranscriptionCoordinator] ❌ Whisper transcription failed: {e}"

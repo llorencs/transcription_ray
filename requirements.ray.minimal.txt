@@ -1,0 +1,36 @@
+# Minimal Ray requirements - let pip resolve versions automatically
+ray[default]==2.49.0
+ray[serve]==2.49.0
+
+# ML Core dependencies - CUDA 12.4 compatible with CUDA 12.8
+torch==2.5.1
+torchaudio==2.5.1
+torchvision==0.20.1
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# Essential audio processing
+faster-whisper==1.1.0
+librosa
+soundfile
+pydub
+audioread
+
+# Scientific computing
+numpy
+scipy
+
+# Transformers - let pip resolve compatible versions
+transformers
+tokenizers
+accelerate
+sentencepiece
+
+# Database
+pymongo
+motor
+redis
+
+# Basic utilities
+protobuf
+requests
+httpx

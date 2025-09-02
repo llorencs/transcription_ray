@@ -19,13 +19,16 @@ echo "2. Stopping services..."
 docker compose down
 
 # Build only Ray container first
-echo "3. Building Ray container (this is the critical one)..."
+echo "3. Building Ray container with simplified dependencies..."
 docker compose build --no-cache ray-head
 
 # Test the Ray container specifically
 echo "4. Testing Ray container ML dependencies..."
 echo "   Testing basic Python..."
 docker compose run --rm ray-head python --version
+
+echo "   Testing pip list..."
+docker compose run --rm ray-head pip list | grep -E "(torch|ray|whisper|librosa)"
 
 echo "   Testing PyTorch installation..."
 docker compose run --rm ray-head python -c "
@@ -35,6 +38,8 @@ print(f'CUDA available: {torch.cuda.is_available()}')
 if torch.cuda.is_available():
     print(f'CUDA version: {torch.version.cuda}')
     print(f'GPU count: {torch.cuda.device_count()}')
+else:
+    print('CUDA not available in container (this might be OK for testing)')
 "
 
 echo "   Testing Faster Whisper..."

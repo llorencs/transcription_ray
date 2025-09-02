@@ -71,6 +71,12 @@ test-ray-simple:
 	@echo "🧪 Running simple Ray test..."
 	@python3 scripts/test_ray_simple.py
 
+# Quick PyTorch fix for WSL CUDA issues
+pytorch-fix:
+	@echo "🚀 Fixing PyTorch CUDA issues for WSL..."
+	@chmod +x scripts/quick_pytorch_fix.sh
+	@bash scripts/quick_pytorch_fix.sh
+
 # Quick fix for ML dependencies
 quick-fix:
 	@echo "🚀 Running quick fix for ML dependencies..."
@@ -82,6 +88,12 @@ rebuild:
 	@echo "🏗️ Rebuilding and testing everything..."
 	@chmod +x scripts/rebuild_and_test.sh
 	@bash scripts/rebuild_and_test.sh
+
+# Debug Ray actors step by step
+debug-actors-step:
+	@echo "🔍 Testing Ray actors step by step..."
+	@chmod +x scripts/test_actor_step_by_step.sh
+	@bash scripts/test_actor_step_by_step.sh
 
 # Debug Ray actors specifically (run inside Ray container)
 debug-actors:
