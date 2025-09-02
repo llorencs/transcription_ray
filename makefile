@@ -12,29 +12,9 @@ help:
 	@echo "  status       - Show service status"
 	@echo "  test         - Run API tests (requires TEST_AUDIO_FILE)"
 	@echo "  test-ray     - Run Ray-based transcription test"
+	@echo "  debug-ray    - Debug Ray container and dependencies"
+	@echo "  debug-actors - Debug Ray actors specifically"
 	@echo "  verify-ray   - Verify ML dependencies in Ray container"
-	@echo "  test-container - Run tests inside API container"
-
-# Verify Ray dependencies
-verify-ray:
-	@echo "🔍 Verifying ML dependencies in Ray container..."
-	@docker compose exec ray-head python /app/scripts/verify_ray_deps.py
-
-# Test inside container
-test-container:
-	@echo "🧪 Running tests inside API container..."
-	@docker compose exec api bash /app/scripts/test_inside_container.sh
-
-# Quick test with sample file
-quick-test:
-	@echo "🚀 Quick test with direct transcription..."
-	@echo "This test uses the direct transcription service (no Ray dependency)"
-	@if [ ! -f "test_sample.wav" ]; then \
-		echo "📝 Creating a test audio file..."; \
-		echo "Note: You should replace this with a real audio file"; \
-		touch test_sample.wav; \
-	fi
-	@make test-direct TEST_AUDIO_FILE=test_sample.wav
 	@echo "  clean        - Clean up containers and volumes"
 	@echo "  build        - Build Docker images"
 	@echo "  health       - Check service health"
@@ -81,6 +61,26 @@ test-ray:
 	@echo "🧪 Running Ray-based transcription test..."
 	@python3 scripts/test_ray.py "$(TEST_AUDIO_FILE)"
 
+# Debug Ray container
+debug-ray:
+	@echo "🔍 Debugging Ray container..."
+	@bash scripts/debug_ray.sh
+
+# Simple Ray test
+test-ray-simple:
+	@echo "🧪 Running simple Ray test..."
+	@python3 scripts/test_ray_simple.py
+
+# Debug Ray actors specifically
+debug-actors:
+	@echo "🔍 Debugging Ray actors..."
+	@python3 scripts/debug_ray_actors.py
+
+# Verify Ray dependencies
+verify-ray:
+	@echo "🔍 Verifying ML dependencies in Ray container..."
+	@docker compose exec ray-head python /app/scripts/verify_ray_deps.py
+
 # Clean up everything
 clean:
 	@echo "🧹 Cleaning up..."
@@ -114,35 +114,6 @@ db-reset:
 	@docker compose exec mongodb mongosh transcription_db --eval "db.dropDatabase()"
 	@docker compose exec mongodb mongosh transcription_db < mongo-init.js
 
-# Backup operations
-backup:
-	@echo "💾 Creating backup..."
-	@mkdir -p backups
-	@docker compose exec -T mongodb mongodump --db transcription_db --archive | gzip > backups/transcription_$(shell date +%Y%m%d_%H%M%S).gz
-
-restore:
-	@if [ -z "$(BACKUP_FILE)" ]; then \
-		echo "❌ Please specify BACKUP_FILE"; \
-		echo "Example: make restore BACKUP_FILE=backups/transcription_20240101_120000.gz"; \
-		exit 1; \
-	fi
-	@echo "📥 Restoring from backup: $(BACKUP_FILE)"
-	@gunzip -c "$(BACKUP_FILE)" | docker compose exec -T mongodb mongorestore --archive --drop
-
-# Monitoring
-monitor:
-	@echo "📊 Opening monitoring dashboards..."
-	@echo "Ray Dashboard: http://localhost:8265"
-	@echo "API Documentation: http://localhost:8080/docs"
-	@echo "Ray Serve Health: http://localhost:8000/health"
-	@if command -v open >/dev/null 2>&1; then \
-		open http://localhost:8080/docs; \
-		open http://localhost:8265; \
-	elif command -v xdg-open >/dev/null 2>&1; then \
-		xdg-open http://localhost:8080/docs; \
-		xdg-open http://localhost:8265; \
-	fi
-
 # Example usage
 example:
 	@echo "📝 Example API usage:"
@@ -165,14 +136,4 @@ example:
 	@echo "   curl http://localhost:8080/results/your-task-id/srt"
 	@echo ""
 	@echo "Test commands:"
-	@echo "  make test-direct TEST_AUDIO_FILE=/path/to/audio.wav"
-
-# Verify ML dependencies
-verify-deps:
-	@echo "🔍 Verifying ML dependencies in API container..."
-	@docker compose exec api python /app/scripts/verify_ml_deps.py
-
-# Test inside container
-test-container:
-	@echo "🧪 Running tests inside API container..."
-	@docker compose exec api bash /app/scripts/test_inside_container.sh
+	@echo "  make test-ray TEST_AUDIO_FILE=/path/to/audio.wav"
