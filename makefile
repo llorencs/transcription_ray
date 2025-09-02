@@ -71,10 +71,23 @@ test-ray-simple:
 	@echo "🧪 Running simple Ray test..."
 	@python3 scripts/test_ray_simple.py
 
-# Debug Ray actors specifically
+# Quick fix for ML dependencies
+quick-fix:
+	@echo "🚀 Running quick fix for ML dependencies..."
+	@chmod +x scripts/quick_fix.sh
+	@bash scripts/quick_fix.sh
+
+# Rebuild and test everything
+rebuild:
+	@echo "🏗️ Rebuilding and testing everything..."
+	@chmod +x scripts/rebuild_and_test.sh
+	@bash scripts/rebuild_and_test.sh
+
+# Debug Ray actors specifically (run inside Ray container)
 debug-actors:
 	@echo "🔍 Debugging Ray actors..."
-	@python3 scripts/debug_ray_actors.py
+	@chmod +x scripts/debug_ray_container.sh
+	@bash scripts/debug_ray_container.sh
 
 # Verify Ray dependencies
 verify-ray:

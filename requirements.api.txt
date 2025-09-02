@@ -1,13 +1,20 @@
+# FastAPI and web server dependencies (lightweight)
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
-motor==3.7.1
-pymongo==4.14.1
 python-multipart==0.0.17
 aiofiles==24.1.0
-ray[default]==2.49.0
-redis==5.2.0
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
 httpx==0.28.1
 uvloop==0.21.0
+
+# Database
+motor==3.7.1
+pymongo==4.14.1
+
+# Ray client (for connecting to Ray cluster)
+ray[default]==2.49.0
+redis==5.2.0
+
+# Authentication (optional)
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4

@@ -1,7 +1,6 @@
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 USER root
-
 WORKDIR /app
 
 # Install Python 3.12 and system dependencies
@@ -12,11 +11,13 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     ffmpeg \
     libsndfile1 \
+    libsndfile1-dev \
     build-essential \
     pkg-config \
     git \
     wget \
     curl \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Python 3.12 as default and create virtual environment
@@ -26,26 +27,62 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
 
 # Activate virtual environment and upgrade pip
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --upgrade pip==24.0 setuptools wheel
 
-# Copy requirements and install Python packages (ML dependencies for Ray workers)
+# Copy requirements file
 COPY requirements.ray.txt .
-RUN pip install --no-cache-dir -r requirements.ray.txt
+
+# Install PyTorch with CUDA 12.4 support (compatible with CUDA 12.8)
+RUN pip install --no-cache-dir torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1 --extra-index-url https://download.pytorch.org/whl/cu124
+
+# Install Ray
+RUN pip install --no-cache-dir ray[default]==2.49.0 ray[serve]==2.49.0
+
+# Install ML and audio processing libraries
+RUN pip install --no-cache-dir \
+    faster-whisper==1.1.0 \
+    librosa==0.10.2 \
+    soundfile==0.12.1 \
+    pydub==0.25.1 \
+    audioread==3.0.1
+
+# Install scientific computing
+RUN pip install --no-cache-dir \
+    numpy==2.1.3 \
+    scipy==1.14.1
+
+# Install transformers and related
+RUN pip install --no-cache-dir \
+    transformers==4.47.0 \
+    tokenizers==0.20.3 \
+    accelerate==1.1.1 \
+    sentencepiece==0.2.0
+
+# Install pyannote.audio for diarization (optional, requires HF token)
+RUN pip install --no-cache-dir pyannote.audio==3.3.2 || echo "Warning: pyannote.audio installation failed"
+
+# Install remaining dependencies
+RUN pip install --no-cache-dir \
+    pymongo==4.14.1 \
+    motor==3.7.1 \
+    redis==5.2.0 \
+    protobuf==5.28.3 \
+    typing-extensions==4.12.2 \
+    pyyaml==6.0.2 \
+    requests==2.32.3 \
+    httpx==0.28.1
 
 # Copy application code
 COPY ./src /app/src
 COPY ./config /app/config
+COPY ./scripts /app/scripts
 
-# Create directories for ML models and temporary files
-RUN mkdir -p /app/temp /app/models
+# Create directories
+RUN mkdir -p /app/temp /app/models /app/logs
 
-# Create ray user and set ownership (use automatic UID if 1001 conflicts)
-RUN if id -u ray >/dev/null 2>&1; then \
-        echo "User ray already exists"; \
-    else \
-        useradd -m ray; \
-    fi && \
-    chown -R ray:ray /app /opt/venv
+# Create ray user
+RUN useradd -m -s /bin/bash ray || echo "User ray already exists"
+RUN chown -R ray:ray /app /opt/venv
 
 # Set environment variables
 ENV PYTHONPATH=/app:/app/src
@@ -53,10 +90,13 @@ ENV PYTHONUNBUFFERED=1
 ENV RAY_DISABLE_IMPORT_WARNING=1
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH="/opt/venv/bin:/usr/local/cuda/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
 
+# Switch to ray user
 USER ray
 
 # Expose ports
 EXPOSE 6379 8265 10001 8000
 
+# Default command
 CMD ["bash"]
