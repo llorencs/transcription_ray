@@ -15,9 +15,16 @@ from datetime import datetime
 # Add project root to path
 sys.path.append("/app/src")
 
-# Import the safe actor
-sys.path.append("/app/scripts")
-from safe_whisper_actor import SafeWhisperActor
+# Import the safe actor - fix import path
+try:
+    # Try absolute import first
+    from scripts.safe_whisper_actor import SafeWhisperActor
+except ImportError:
+    # Fallback to path-based import
+    import sys
+
+    sys.path.append("/app/scripts")
+    from .safe_whisper_actor import SafeWhisperActor
 
 
 class TranscriptionService:
