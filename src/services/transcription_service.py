@@ -18,13 +18,16 @@ sys.path.append("/app/src")
 # Import the safe actor - fix import path
 try:
     # Try absolute import first
-    from scripts.safe_whisper_actor import SafeWhisperActor
+    from .safe_whisper_actor import SafeWhisperActor
 except ImportError:
     # Fallback to path-based import
-    import sys
+    try:
+        from src.services.safe_whisper_actor import SafeWhisperActor
+    except ImportError:
+        import sys
 
-    sys.path.append("/app/scripts")
-    from .safe_whisper_actor import SafeWhisperActor
+        sys.path.append("/app/scripts")
+        from safe_whisper_actor import SafeWhisperActor
 
 
 class TranscriptionService:
